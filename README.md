@@ -12,7 +12,7 @@
 npm ci
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-multiple-connect-0.2.3.tgz
+dsh plugin --profile web add ./dsh-multiple-connect-0.2.4.tgz
 ```
 
 重新启动 DSH 后，在「设置 → DSH-MultipleConnect → 通用设置」打开主对话、配置连接模式。若曾安装旧 IM 插件，先在同一 profile 中停用旧插件，避免两个宿主连接同一个机器人。原渠道沿用已有配置及凭据存储，新的连接模式与发送授权独立保存，默认全部外连、禁用工具发送和自动推送。已有 DSH 会话仍可以从原工作区访问。
@@ -30,6 +30,8 @@ dsh plugin --profile web add ./dsh-multiple-connect-0.2.3.tgz
 ## Snowluma
 
 在 Snowluma 为一个 QQ 账号启用 OneBot v11 正向 WebSocket，支持消息段数组和 CQ 码。打开插件的「Snowluma」渠道页，填写 WebSocket URL、Access Token、允许接收消息的 QQ 私聊账号和群号。两种模式均保存白名单群实际收到的消息，内连群聊仍通过 `@机器人` 触发回复。可查询嵌套转发、群文件、相册及平台可见历史。其他 OneBot 实现的扩展能力取决于服务端接口。可以在「投递目标」选择收件人或手动添加 QQ 目标。
+
+支持忙时消息处理的机器人默认使用「注入纠偏」，符合条件的补充消息由 Agent 在当前回合的下一步读取。已保存的全局设置和机器人覆盖继续生效。Snowluma 内连目前固定排队。
 
 ## 消息与附件存储
 

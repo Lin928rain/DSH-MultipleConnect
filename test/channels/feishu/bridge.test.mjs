@@ -643,11 +643,12 @@ test('Feishu batch start is busy behind a turn and submitting lets later message
   await batchStarted.promise;
   const laterMessage = bridge.accept(event('batch-queue-later', '提交后的普通消息'));
   await bridge.accept(event('batch-queue-cancel-late', '/cancel'));
-  assert.match(sent.at(-1), /已经提交，无法取消/);
   releaseBatch.resolve();
   await Promise.all([submission, laterMessage]);
   await bridge.waitForIdle();
 
+  assert.ok(sent.some((text) => /已经提交，无法取消/.test(text)));
+  assert.ok(sent.some((text) => /已排队/.test(text)));
   assert.equal(asked.length, 3);
   assert.equal(asked[0], '运行中的普通任务');
   assert.match(asked[1], /\[消息 1\]\n批量内容/);

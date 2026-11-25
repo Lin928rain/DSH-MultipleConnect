@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { h } from './i18n.js';
-import { SET_MESSAGE_MODE_ENDPOINT, normalizeBusyMessageMode } from '../../src/channels/shared/message-mode.mjs';
+import { DEFAULT_BUSY_MESSAGE_MODE, SET_MESSAGE_MODE_ENDPOINT, normalizeBusyMessageMode } from '../../src/channels/shared/message-mode.mjs';
 import { normalizeFeishuStepCardPanels } from '../../src/channels/feishu/step-push-mode.mjs';
 import { FEISHU_ENDPOINTS } from './channels/feishu/api.js';
 
@@ -32,7 +32,7 @@ const MODE_HELP = {
 export function BotGeneralSettingsPage({ channel, account, rpcCall }) {
   const modeId = React.useId();
   const [settings, setSettings] = React.useState(() => ({
-    busyMessageMode: 'interrupt', stepCardPanels: normalizeFeishuStepCardPanels(),
+    busyMessageMode: DEFAULT_BUSY_MESSAGE_MODE, stepCardPanels: normalizeFeishuStepCardPanels(),
   }));
   const [savedSettings, setSavedSettings] = React.useState(null);
   const [busy, setBusy] = React.useState(false);

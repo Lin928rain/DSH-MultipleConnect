@@ -3,8 +3,7 @@
  * is already being generated.
  *
  * - interrupt: supersede the in-flight turn and process the new message as a
- *   fresh turn (the humanize fork's default: the user only perceives the
- *   newest turn, never the interruption).
+ *   fresh turn.
  * - queue: let the current turn finish, then process the message.
  * - steer: inject the message into the running turn as a correction.
  *
@@ -17,7 +16,7 @@
 export const SET_MESSAGE_MODE_ENDPOINT = 'bot.message-mode.set';
 
 export const BUSY_MESSAGE_MODES = Object.freeze(['interrupt', 'queue', 'steer']);
-export const DEFAULT_BUSY_MESSAGE_MODE = 'interrupt';
+export const DEFAULT_BUSY_MESSAGE_MODE = 'steer';
 
 /**
  * Stop reason recorded when a new message supersedes an in-flight turn

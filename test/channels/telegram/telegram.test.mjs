@@ -2644,8 +2644,7 @@ test('Telegram private placeholder streams keep controls responsive and ordinary
       });
       const bridge = new TelegramHarnessBridge({
         bot: client, state, thinkingTraces: false,
-        // The follow-up case below asserts the queue path, so pin the mode:
-        // the shipped default is interrupt, which supersedes instead.
+        // Pin queue for the follow-up case below.
         harness: { workspaceSession: () => session, currentBusyMessageMode: () => 'queue' },
         logger: { warn() {}, error() {} },
       });

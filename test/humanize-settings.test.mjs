@@ -25,7 +25,7 @@ test('normalizeHumanizeSettings fills the new defaults and repairs malformed val
   assert.deepEqual(normalized, {
     streaming: true,
     messageBreak: true,
-    busyMessageMode: 'interrupt',
+    busyMessageMode: 'steer',
     sendDelay: DEFAULT_SEND_DELAY_CONFIG,
     typingIndicator: DEFAULT_TYPING_INDICATOR,
     typingBurst: DEFAULT_TYPING_BURST,
@@ -36,6 +36,7 @@ test('normalizeHumanizeSettings fills the new defaults and repairs malformed val
   // Legacy typingIndicator booleans map onto the new modes.
   assert.equal(normalizeHumanizeSettings({ typingIndicator: true }).typingIndicator, 'burst');
   assert.equal(normalizeHumanizeSettings({ typingIndicator: false }).typingIndicator, 'off');
+  assert.equal(normalizeHumanizeSettings({ busyMessageMode: 'interrupt' }).busyMessageMode, 'interrupt');
   // Malformed values fall back to defaults instead of throwing.
   const repaired = normalizeHumanizeSettings({
     typingIndicator: 'nonsense',
@@ -150,7 +151,7 @@ test('resolveHumanizeSettings prefers the live provider and normalizes its outpu
   assert.deepEqual(resolved, {
     streaming: false,
     messageBreak: true,
-    busyMessageMode: 'interrupt',
+    busyMessageMode: 'steer',
     sendDelay: DEFAULT_SEND_DELAY_CONFIG,
     typingIndicator: DEFAULT_TYPING_INDICATOR,
     typingBurst: DEFAULT_TYPING_BURST,

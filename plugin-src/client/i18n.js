@@ -1259,7 +1259,7 @@ const EN = Object.freeze({
   '过程进度提示': 'Progress hints',
   '处理任务时显示中间状态气泡（如“正在处理…”“正在使用工具…”“正在整理结果…”）。关闭后不发送占位气泡与中间进度文案，回复直达；流式文本仍正常逐字显示。适用于所有具备过程气泡的聊天渠道（QQ/微信本就无中间进度；AI Office 任务进度不受影响）。': 'Show interim status bubbles while processing (e.g. "Processing…", "Using tool…", "Gathering results…"). When disabled, no placeholder or progress text is sent and replies arrive directly; streaming text still appears word by word. Applies to every chat channel that has progress bubbles (QQ/WeChat never had interim progress; AI Office job progress is unaffected).',
   '消息处理方式（全局默认）': 'Message handling (global default)',
-  '机器人未单独设置时使用：生成中收到新消息，是打断重发、排队等待，还是注入为纠偏指令。交互等待时一律排队。每个机器人可在「通用设置」里单独覆盖。': 'Used by a bot that has no setting of its own: whether a message arriving mid-generation interrupts and resends, queues, or is injected as a steering instruction. Pending interactions always queue. Each bot can override this in its general settings.',
+  '支持此项的机器人可在「通用设置」中覆盖。等待交互时，普通消息排队。Snowluma 内连目前固定排队。': 'Bots that support this setting can override it in General settings. Regular messages queue while an interaction is pending. Internal Snowluma connections always queue.',
   '打断重发 (interrupt)': 'Interrupt & resend (interrupt)',
   '排队等待 (queue)': 'Queue & wait (queue)',
   '注入纠偏 (steer)': 'Inject as steering (steer)',

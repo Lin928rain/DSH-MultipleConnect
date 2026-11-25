@@ -113,7 +113,7 @@ test('Host composes IM channels and the AI Office connector inside one plugin co
   const expectedHumanize = {
     streaming: true,
     messageBreak: true,
-    busyMessageMode: 'interrupt',
+    busyMessageMode: 'steer',
     sendDelay: DEFAULT_SEND_DELAY_CONFIG,
     typingIndicator: DEFAULT_TYPING_INDICATOR,
     typingBurst: DEFAULT_TYPING_BURST,

@@ -185,6 +185,7 @@ test('a newer message silently supersedes a turn already inside the harness', as
     humanize: humanizeSettings({ typingIndicator: 'off' }),
     harness: {
       createSession: async () => 'session-harness-interrupt',
+      currentBusyMessageMode: () => 'interrupt',
       workspaceSession: () => ({
         sessionExists: async () => true,
         stopActiveTurn: async (_control, options = {}) => {
@@ -290,7 +291,7 @@ test('with busyMessageMode queue, a message during an in-flight ask queues inste
     'both turns deliver their replies — no silent supersede');
 }));
 
-test('with busyMessageMode steer, a plain text message steers and never supersedes', async () => withKeepAlive(async () => {
+test('a plain text message steers the live turn when no busy-message mode is configured', async () => withKeepAlive(async () => {
   const bot = recordedBot({ withTyping: false });
   const steers = [];
   const bridge = createBridge({
@@ -300,7 +301,6 @@ test('with busyMessageMode steer, a plain text message steers and never supersed
       { enabled: true, readDelay: { minMs: 5, maxMs: 10 } },
     ),
     harness: {
-      currentBusyMessageMode: () => 'steer',
       // Automatic steering only reaches a live turn through a workspaceSession
       // view, so the fixture exposes one.
       workspaceSession: (sessionId) => ({

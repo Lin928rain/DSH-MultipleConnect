@@ -27,25 +27,24 @@ test('general settings auto-saves changes, rolls back failures, and blocks edits
     return new Promise((resolve) => { finishSave = () => resolve(result('one', payload.busyMessageMode)); });
   });
   const select = () => view.root.findByType('select');
-  // An unset mode reaches the panel already resolved: interrupt is the default.
-  assert.equal(select().props.value, 'interrupt');
+  assert.equal(select().props.value, 'steer');
   assert.deepEqual(select().findAllByType('option').map((node) => node.props.value),
     ['interrupt', 'queue', 'steer']);
   assert.equal(view.root.findAllByType('button').length, 0);
-  await act(async () => select().props.onChange({ target: { value: 'interrupt' } }));
-  assert.deepEqual(calls, [{ endpoint: 'connection.status', payload: {} }]);
   await act(async () => select().props.onChange({ target: { value: 'steer' } }));
+  assert.deepEqual(calls, [{ endpoint: 'connection.status', payload: {} }]);
+  await act(async () => select().props.onChange({ target: { value: 'interrupt' } }));
   assert.match(text(view.root.findByProps({ role: 'alert' })), /disk full/);
-  assert.equal(select().props.value, 'interrupt');
+  assert.equal(select().props.value, 'steer');
   assert.equal(select().props.disabled, false);
   fail = false;
-  await act(async () => select().props.onChange({ target: { value: 'steer' } }));
-  assert.deepEqual(calls.at(-1), { endpoint: 'bot.message-mode.set', payload: { botId: 'one', busyMessageMode: 'steer' } });
+  await act(async () => select().props.onChange({ target: { value: 'interrupt' } }));
+  assert.deepEqual(calls.at(-1), { endpoint: 'bot.message-mode.set', payload: { botId: 'one', busyMessageMode: 'interrupt' } });
   assert.equal(select().props.disabled, true);
   await act(async () => select().props.onChange({ target: { value: 'queue' } }));
   assert.equal(calls.length, 3);
   await act(async () => finishSave());
-  assert.equal(select().props.value, 'steer');
+  assert.equal(select().props.value, 'interrupt');
   assert.equal(select().props.disabled, false);
   assert.equal(view.root.findAllByProps({ role: 'alert' }).length, 0);
 });

@@ -328,7 +328,8 @@ function normalizeDocument(value) {
   if (value.busyMessageModes && typeof value.busyMessageModes === 'object'
     && !Array.isArray(value.busyMessageModes)) {
     for (const [id, mode] of Object.entries(value.busyMessageModes)) {
-      if (Object.hasOwn(workspaces, id) && mode === 'steer') busyMessageModes[id] = mode;
+      const stored = storedBusyMessageMode(mode);
+      if (Object.hasOwn(workspaces, id) && stored !== undefined) busyMessageModes[id] = stored;
     }
   }
   const accessPolicies = normalizeAccessPolicies(value.accessPolicies, workspaces);

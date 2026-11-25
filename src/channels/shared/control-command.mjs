@@ -41,12 +41,9 @@ export function isControlCommand(text) {
 export async function steerMessage(text, harness, state, key, {
   signal, control, enhancement, pendingInteraction = false,
 } = {}) {
-  if (pendingInteraction) return false;
+  if (pendingInteraction || typeof harness?.workspaceSession !== 'function') return false;
   const session = boundSession(harness, state, key);
-  if (!session) return false;
-  if (typeof session.steerActiveTurn !== 'function') {
-    throw new TypeError('Harness session does not support steering active turns');
-  }
+  if (typeof session?.steerActiveTurn !== 'function') return false;
   const steering = enhancement
     ? enhanceContextContent(text, enhancement.snapshot, enhancement.source)
     : text;

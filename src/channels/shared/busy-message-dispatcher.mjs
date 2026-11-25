@@ -27,11 +27,12 @@ export class BusyMessageDispatcher {
   }) {
     // Read once, before any await: a settings change cannot reinterpret this input.
     const resolved = normalizeBusyMessageMode(mode);
-    const steer = resolved === 'steer'
+    const busy = isQueued();
+    const steer = resolved === 'steer' && busy
       && (typeof eligible === 'function' ? eligible() : eligible) && Boolean(text?.trim()) && !isSharedLocalCommand(commandText);
     // Only a busy key can be superseded, and a turn waiting for a question or
     // an approval must never be thrown away: interrupting would lose it.
-    const interrupt = resolved === 'interrupt' && isQueued() && !pendingInteraction();
+    const interrupt = resolved === 'interrupt' && busy && !pendingInteraction();
     const report = async (error) => {
       onFailure?.(error);
       if (signal?.aborted || error?.code === 'turn-stopped') return;
@@ -65,7 +66,7 @@ export class BusyMessageDispatcher {
     };
     const route = async () => {
       signal?.throwIfAborted();
-      if (!steer || pendingInteraction()) return queue();
+      if (!steer || !isQueued() || pendingInteraction() || !state.sessionFor?.(key)) return queue();
       if (state.hasSeen(messageId)) return {};
       await state.markSeen(messageId);
       status.messagesReceived = (status.messagesReceived ?? 0) + 1;

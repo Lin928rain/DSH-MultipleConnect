@@ -31,6 +31,23 @@ function fixture() {
     mode: (value) => { mode = value; }, pending: () => { pending = true; } };
 }
 
+test('steer sends an idle chat through the ordinary input queue', async () => {
+  const f = fixture();
+  const first = f.dispatch('one', { isQueued: () => false });
+  assert.deepEqual(f.calls, [['queue', false]]);
+  f.turn.resolve();
+  await first;
+});
+
+test('steer queues an accepted message when the busy session has no steering capability', async () => {
+  const f = fixture();
+  const task = f.dispatch('one', { harness: { workspaceSession: () => ({}) } });
+  await tick();
+  assert.deepEqual(f.calls.filter(([action]) => action !== 'reply'), [['queue', true]]);
+  f.turn.resolve();
+  await task;
+});
+
 test('routing is FIFO across a delayed false submission and a mode change; it never waits for the long task', async () => {
   const f = fixture();
   const first = f.dispatch('one', { text: 'one' });
