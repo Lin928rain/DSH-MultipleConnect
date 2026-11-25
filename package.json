@@ -1,6 +1,6 @@
 {
   "name": "dsh-multiple-connect",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "icon": "./assets/logo-plugin-message-link-gradient.webp",
   "description": "Connect messaging platforms to a shared DeepSeek Harness conversation and a persistent external inbox.",
   "keywords": [
@@ -74,12 +74,18 @@
       "platform": "web"
     },
     "compatibility": {
-      "dsh": "0.2.1-rc.2",
+      "dsh": "0.2.1-rc.2 || 0.2.2-rc.1 - 0.2.2-rc.5",
       "dshReleases": {
-        "0.2.1-rc.2": "compatible"
+        "0.2.1-rc.2": "compatible",
+        "0.2.2-rc.1": "compatible",
+        "0.2.2-rc.2": "compatible",
+        "0.2.2-rc.3": "compatible",
+        "0.2.2-rc.4": "compatible",
+        "0.2.2-rc.5": "compatible"
       },
       "profiles": [
-        "web"
+        "web",
+        "desktop"
       ]
     }
   },
@@ -89,7 +95,8 @@
     "check": "npm run build && npm test && node scripts/verify-package.mjs"
   },
   "engines": {
-    "node": ">=22.19"
+    "node": ">=22.19",
+    "dsh": "0.2.1-rc.2 || 0.2.2-rc.1 - 0.2.2-rc.5"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.18.5",
@@ -105,7 +112,11 @@
     "undici": "7.29.1"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.5",
     "@larksuiteoapi/node-sdk": "1.73.0",
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "esbuild": "0.25.9",
@@ -125,9 +136,9 @@
     "sharp": "0.35.5"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.2"
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2 || 0.2.2-rc.1 - 0.2.2-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2 || 0.2.2-rc.1 - 0.2.2-rc.5",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2 || 0.2.2-rc.1 - 0.2.2-rc.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2 || 0.2.2-rc.1 - 0.2.2-rc.5"
   }
 }

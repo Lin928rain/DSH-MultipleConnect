@@ -4,16 +4,18 @@
 
 ## 构建与安装
 
-适用版本为 DSH Web `0.2.1-rc.2`，构建需要 Node.js 22.19 或更新版本。
+支持 DSH Web 和桌面端 `0.2.2-rc.1` 至 `0.2.2-rc.5`，并保留对 `0.2.1-rc.2` 的兼容。桌面端可在插件页用本仓库地址安装，也可从 [GitHub Release](https://github.com/Lin928rain/DSH-MultipleConnect/releases/latest) 下载安装包。
+
+本地构建需要 Node.js 22.19 或更新版本。Web 版可使用以下命令安装。
 
 ```powershell
 npm ci
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-multiple-connect-0.2.0.tgz
+dsh plugin --profile web add ./dsh-multiple-connect-0.2.1.tgz
 ```
 
-重新启动对应的 DSH Web profile 后，在「设置 → DSH-MultipleConnect → 通用设置」打开主对话、配置连接模式。若曾安装旧 IM 插件，先在同一 profile 中停用旧插件，避免两个宿主连接同一个机器人。原渠道沿用已有配置及凭据存储，新的连接模式与发送授权独立保存，默认全部外连、禁用工具发送和自动推送。已有 DSH 会话仍可以从原工作区访问。
+重新启动 DSH 后，在「设置 → DSH-MultipleConnect → 通用设置」打开主对话、配置连接模式。若曾安装旧 IM 插件，先在同一 profile 中停用旧插件，避免两个宿主连接同一个机器人。原渠道沿用已有配置及凭据存储，新的连接模式与发送授权独立保存，默认全部外连、禁用工具发送和自动推送。已有 DSH 会话仍可以从原工作区访问。
 
 ## 主对话与连接
 

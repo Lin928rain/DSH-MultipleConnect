@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import semver from 'semver';
 
 const root = resolve(import.meta.dirname, '..');
 const read = (path) => readFile(resolve(root, path), 'utf8');
@@ -13,6 +14,8 @@ const manifest = JSON.parse(packageText);
 const lock = JSON.parse(lockText);
 assert.equal(manifest.name, 'dsh-multiple-connect');
 assert.equal(lock.packages[''].name, manifest.name);
+assert.equal(lock.version, manifest.version);
+assert.equal(lock.packages[''].version, manifest.version);
 assert.match(patch, /name:\s*dsh-multiple-connect/u);
 assert.match(client, /id:\s*["']dsh-multiple-connect["']/u);
 assert.match(proactiveLicense, /MIT License/u);
@@ -20,8 +23,16 @@ assert.ok(manifest.files.includes('vendor/proactive/LICENSE'));
 
 const hostLibraries = ['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-tools'];
+const { dsh: dshRange, dshReleases } = manifest.dsh.compatibility;
+assert.equal(manifest.engines.dsh, dshRange);
+assert.ok(semver.validRange(dshRange), 'Declare a valid Host version range');
+for (const [version, status] of Object.entries(dshReleases)) {
+  assert.equal(semver.satisfies(version, dshRange), status === 'compatible',
+    'Host install check and compatibility table disagree for ' + version);
+}
 for (const name of hostLibraries) {
-  assert.ok(manifest.peerDependencies?.[name], 'Declare a shared host peer for ' + name);
+  assert.equal(manifest.peerDependencies[name], dshRange, 'Align shared Host peer for ' + name);
+  assert.equal(lock.packages[''].peerDependencies[name], dshRange, 'Sync shared Host peer lock for ' + name);
   assert.equal(manifest.dependencies?.[name], undefined);
   assert.ok(host.includes(name), 'Keep the Host import external for ' + name);
 }
