@@ -201,10 +201,14 @@ export async function apply(ctx: Context, integration: {
   const syncRef: { current?: ScheduleSyncHandle } = {};
   const requestSync = (): Promise<unknown> => syncRef.current?.enqueueSync() ?? Promise.resolve(undefined);
   const hostLog = (level: "info" | "warn" | "error", message: string) => ctx.logger[level](message);
+  // Newer DSH keeps subagent membership outside the Agent registry.
+  const agents = ctx.agents as typeof ctx.agents & { roots?: () => readonly Agent[] };
+  const acceptsTools = (agent: Agent): boolean => agents.roots?.().includes(agent)
+    ?? (agent.session.header.origin !== "subagent");
   const registered = new WeakSet<Agent>();
   const registerOne = (agent: Agent) => {
     if (registered.has(agent)) return;
-    if (!ctx.agents.roots().includes(agent)) return;
+    if (!acceptsTools(agent)) return;
     registered.add(agent);
     registerProactiveTools(agent.ctx, agent, {
       store,
@@ -223,7 +227,7 @@ export async function apply(ctx: Context, integration: {
     registerOne(agent);
     return undefined;
   });
-  for (const existing of ctx.agents.roots()) {
+  for (const existing of agents.roots?.() ?? agents.list()) {
     registerOne(existing);
   }
 
