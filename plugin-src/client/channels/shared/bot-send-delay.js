@@ -1,58 +1,7 @@
-/**
- * Per-bot humanization override editor, shared by every IM channel card.
- *
- * Exposes every per-bot humanization setting (streaming, messageBreak,
- * statusReaction, replyQuote, progressStatus, typingIndicator, typingBurst,
- * sendDelay) for per-bot override. Each setting uses a tri-state dropdown:
- * the empty value means "follow global"; a specific value means "custom
- * override". typingBurst and sendDelay use a "自定义" checkbox + the shared
- * sub-forms. The busy-message mode is NOT here: it has its own per-bot slot
- * and is edited in the per-bot general settings page.
- *
- * Field layout, hints, presets, and validation come from
- * humanize-fields.js — the SAME building blocks the global settings
- * panel renders — so the two surfaces cannot drift apart in detail or
- * format. Only the wrapper is per-bot specific: the follow-global /
- * custom gates, the override-count badge, and the channel capability
- * note.
- *
- * Data model (see src/channels/shared/humanize-override.mjs): the per-bot
- * humanize section is per-key — keys present in the section override the
- * resolved global defaults; keys absent inherit them. The editor saves
- * ONLY the custom keys (or null to clear everything). A custom sendDelay
- * is complete on write (the shared form always carries every subfield);
- * the prefill base is the override when one exists, otherwise the
- * resolved GLOBAL settings projected onto the snapshot as
- * `humanizeDefaults`, falling back to the shipped defaults.
- *
- * A mounted editor owns its draft: the 15-second silent status polling
- * rebuilds snapshot objects, and refreshes must not replace unsaved edits
- * (same convention as ContextEnhancementDialog). Re-sync happens only
- * while the draft is clean (never edited, or after a successful save).
- *
- * Checkable inputs are audited by scripts/verify-package.mjs — keep the
- * checkbox count here in sync with its manifest.
- */
 import * as React from 'react';
-
 import { h } from '../../i18n.js';
-import { PER_BOT_HUMANIZE_KEYS } from '../../../../src/channels/shared/humanize-schema.mjs';
-import {
-  FieldError,
-  SEND_DELAY_PRESETS,
-  SCALAR_HUMANIZE_FIELDS,
-  SendDelayFields,
-  SendDelayPresetSelect,
-  TypingBurstFields,
-  burstDraftFrom,
-  draftFromConfig,
-  resolvedHumanizeDefaults,
-  validateBurstDraft,
-  validateSendDelayDraft,
-} from './humanize-fields.js';
+import { SCALAR_HUMANIZE_FIELDS, resolvedHumanizeDefaults } from './humanize-fields.js';
 
-// Channels without a typing/status API only get the delay, and their read
-// delay is capped at SHORT_DELAY_CAP_MS (5s) by the bridges.
 export const TYPING_CAPABILITY = Object.freeze({
   full: 'full',
   c2cOnly: 'c2c-only',
@@ -66,13 +15,12 @@ const BOOLEAN_KEYS = SCALAR_HUMANIZE_FIELDS
   .filter((field) => field.kind === 'boolean').map((field) => field.key);
 const ENUM_KEYS = SCALAR_HUMANIZE_FIELDS
   .filter((field) => field.kind === 'enum').map((field) => field.key);
-const ALL_KEYS = PER_BOT_HUMANIZE_KEYS;
+const ALL_KEYS = [...BOOLEAN_KEYS, ...ENUM_KEYS];
 
 // ── per-key draft derivation ───────────────────────────────────────
 
-function deriveDraft(humanize, defaults) {
+function deriveDraft(humanize) {
   const ov = humanize && typeof humanize === 'object' ? humanize : {};
-  const base = resolvedHumanizeDefaults(defaults);
   const draft = {};
 
   // Booleans and enums: tri-state dropdown value.
@@ -83,23 +31,8 @@ function deriveDraft(humanize, defaults) {
       : '';
   }
   for (const key of ENUM_KEYS) {
-    draft[key] = ov[key] !== undefined ? ov[key] : '';
+    draft[key] = key === 'typingIndicator' && ov[key] === 'burst' ? 'continuous' : ov[key] ?? '';
   }
-
-  // typingBurst: checkbox + shared 4-field group
-  draft.typingBurst = {
-    custom: ov.typingBurst !== undefined,
-    fields: burstDraftFrom(ov.typingBurst !== undefined ? ov.typingBurst : base.typingBurst),
-  };
-
-  // sendDelay: checkbox + shared full form
-  const sdConfig = ov.sendDelay !== undefined
-    ? ov.sendDelay
-    : base.sendDelay;
-  draft.sendDelay = {
-    custom: ov.sendDelay !== undefined,
-    fields: draftFromConfig(sdConfig),
-  };
 
   return draft;
 }
@@ -133,13 +66,6 @@ function buildPayload(draft) {
       payload[key] = draft[key];
     }
   }
-  if (draft.typingBurst.custom) {
-    payload.typingBurst = validateBurstDraft(draft.typingBurst.fields);
-  }
-  if (draft.sendDelay.custom) {
-    payload.sendDelay = validateSendDelayDraft(draft.sendDelay.fields);
-  }
-
   return Object.keys(payload).length > 0 ? payload : null;
 }
 
@@ -147,10 +73,10 @@ function buildPayload(draft) {
 
 function capabilityNote(capability) {
   if (capability === TYPING_CAPABILITY.none) {
-    return '该渠道没有输入状态接口：仅发送延迟生效，阅读延迟封顶 5 秒。';
+    return '该渠道没有输入状态接口。';
   }
   if (capability === TYPING_CAPABILITY.c2cOnly) {
-    return '输入状态仅私聊可用；群聊没有输入状态，阅读延迟封顶 5 秒。';
+    return '输入状态仅私聊可用。';
   }
   return null;
 }
@@ -163,7 +89,7 @@ function booleanLabel(value) {
 function fieldOptions(field) {
   return field.kind === 'boolean'
     ? [{ value: 'true', label: '开启' }, { value: 'false', label: '关闭' }]
-    : field.options;
+    : field.options.filter((option) => option.value !== 'burst');
 }
 
 /** How "follow global" labels the inherited value, in the same terms as the dropdown. */
@@ -184,10 +110,8 @@ export function BotHumanizeEditor({
 }) {
   const defaults = resolvedHumanizeDefaults(humanizeDefaults);
   const [open, setOpen] = React.useState(false);
-  const [presetKey, setPresetKey] = React.useState('');
-  const [draft, setDraft] = React.useState(() => deriveDraft(humanize, humanizeDefaults));
+  const [draft, setDraft] = React.useState(() => deriveDraft(humanize));
   const [dirty, setDirty] = React.useState(false);
-  const [fieldErrors, setFieldErrors] = React.useState(null);
   const [saveError, setSaveError] = React.useState(null);
   const [saved, setSaved] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -197,11 +121,10 @@ export function BotHumanizeEditor({
   // fresh identities; a mounted editor owns its unsaved edits.
   React.useEffect(() => {
     if (dirty) return;
-    setDraft(deriveDraft(humanize, humanizeDefaults));
+    setDraft(deriveDraft(humanize));
   }, [humanize, humanizeDefaults, dirty]);
 
   const beginChange = () => {
-    setFieldErrors(null);
     setSaveError(null);
     setSaved(false);
   };
@@ -216,40 +139,12 @@ export function BotHumanizeEditor({
     updateDraft((prev) => ({ ...prev, [key]: value }));
   };
 
-  const toggleCustom = (key, checked) => {
-    updateDraft((prev) => ({
-      ...prev,
-      [key]: { ...prev[key], custom: checked },
-    }));
-  };
-
-  const applyPreset = (key) => {
-    setPresetKey(key);
-    const preset = SEND_DELAY_PRESETS.find((candidate) => candidate.key === key);
-    if (!preset) return;
-    updateDraft((prev) => ({
-      ...prev,
-      sendDelay: { ...prev.sendDelay, fields: draftFromConfig(preset.config) },
-    }));
-  };
-
   const save = async () => {
     if (disabled || saving || typeof onSave !== 'function') return;
     beginChange();
-    let payload;
-    try {
-      payload = buildPayload(draft);
-    } catch (caught) {
-      if (caught instanceof FieldError) {
-        setFieldErrors({ [caught.field]: caught.message });
-      } else {
-        setSaveError(caught?.message ?? '配置无效，请检查后重试。');
-      }
-      return;
-    }
     setSaving(true);
     try {
-      await onSave(payload);
+      await onSave(buildPayload(draft));
       setSaved(true);
       setDirty(false);
     } catch (caught) {
@@ -265,9 +160,7 @@ export function BotHumanizeEditor({
   // Whether the save button should say "清除覆盖" (payload is null and
   // an override exists) vs "保存" (payload is non-null).
   const hasOverride = countOverrides(humanize) > 0;
-  const draftHasCustom = SCALAR_HUMANIZE_FIELDS.some((field) => draft[field.key] !== '')
-    || draft.typingBurst.custom
-    || draft.sendDelay.custom;
+  const draftHasCustom = SCALAR_HUMANIZE_FIELDS.some((field) => draft[field.key] !== '');
 
   return h('div', { className: 'dim-sendDelayEditor' },
     h('button', {
@@ -303,69 +196,6 @@ export function BotHumanizeEditor({
           h('span', { className: 'dim-humanizeFieldName' }, field.label)),
         h('span', { className: 'dim-humanizeFieldHint' }, field.hint),
       )),
-
-      // ── typingBurst (gated by a custom checkbox) ──────────────────
-      h('div', { className: 'dim-humanizeField dim-sendDelayField' },
-        h('span', { className: 'dim-humanizeFieldRow' },
-          h('input', {
-            type: 'checkbox',
-            checked: draft.typingBurst.custom,
-            disabled: busy,
-            'aria-label': '自定义断续节奏',
-            onChange: (event) => toggleCustom('typingBurst', event.target.checked),
-          }),
-          h('span', { className: 'dim-humanizeFieldName' }, '断续节奏')),
-        draft.typingBurst.custom
-          ? h(TypingBurstFields, {
-            draft: draft.typingBurst.fields,
-            busy,
-            errors: fieldErrors,
-            onField: (field, value) => updateDraft((prev) => ({
-              ...prev,
-              typingBurst: {
-                ...prev.typingBurst,
-                fields: { ...prev.typingBurst.fields, [field]: value },
-              },
-            })),
-          })
-          : h('span', { className: 'dim-humanizeFieldHint' },
-            `跟随全局（${defaults.typingBurst.onMinMs}–${defaults.typingBurst.onMaxMs}`
-            + ` / ${defaults.typingBurst.offMinMs}–${defaults.typingBurst.offMaxMs} 毫秒）`)),
-
-      // ── sendDelay (gated by a custom checkbox) ────────────────────
-      h('div', { className: 'dim-humanizeField dim-sendDelayField' },
-        h('span', { className: 'dim-humanizeFieldRow' },
-          h('input', {
-            type: 'checkbox',
-            checked: draft.sendDelay.custom,
-            disabled: busy,
-            'aria-label': '自定义发送延迟',
-            onChange: (event) => toggleCustom('sendDelay', event.target.checked),
-          }),
-          h('span', { className: 'dim-humanizeFieldName' }, '发送延迟')),
-        draft.sendDelay.custom
-          ? h('div', { className: 'dim-sendDelayFields' },
-            h(SendDelayPresetSelect, {
-              value: presetKey,
-              disabled: busy,
-              onChange: applyPreset,
-            }),
-            h(SendDelayFields, {
-              draft: draft.sendDelay.fields,
-              busy,
-              errors: fieldErrors,
-              onField: (field, value) => updateDraft((prev) => ({
-                ...prev,
-                sendDelay: {
-                  ...prev.sendDelay,
-                  fields: { ...prev.sendDelay.fields, [field]: value },
-                },
-              })),
-            }),
-            h('span', { className: 'dim-humanizeFieldHint dim-sendDelayNote' },
-              '自定义项保存后固定为本页值；未自定义项继续跟随全局设置变化。'))
-          : h('span', { className: 'dim-humanizeFieldHint' },
-            `跟随全局（${defaults.sendDelay?.enabled === true ? '已启用' : '未启用'}）`)),
 
       note ? h('p', { className: 'dim-humanizeFieldHint dim-sendDelayNote' }, note) : null,
 

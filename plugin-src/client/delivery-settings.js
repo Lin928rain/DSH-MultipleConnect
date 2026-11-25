@@ -39,10 +39,19 @@ export const FEISHU_BOT_SETTINGS_TABS = Object.freeze([
 ]);
 
 export function botSettingsTabsForChannel(channel) {
+  if (channel === 'snowluma') return BOT_SETTINGS_TABS.filter(({ id }) => id === 'delivery');
   return channel === 'feishu' ? FEISHU_BOT_SETTINGS_TABS : BOT_SETTINGS_TABS;
 }
 
 const CHANNEL_DEFINITIONS = Object.freeze({
+  snowluma: {
+    label: 'Snowluma',
+    kinds: [{ value: 'user', label: 'QQ user' }, { value: 'group', label: 'QQ group' }],
+    fields: {
+      user: [{ key: 'chatId', label: 'QQ ID' }],
+      group: [{ key: 'chatId', label: 'QQ group ID' }],
+    },
+  },
   weixin: {
     label: '微信',
     kinds: [{ value: 'user', label: '用户' }],
@@ -489,17 +498,8 @@ function TargetSuggestionPicker({
 function TargetRow({ definition, target, botId, connected, rpcCall, onChanged, onEdit }) {
   const [action, setAction] = React.useState(null);
   const [testState, setTestState] = React.useState(null);
-  const [syncFeedback, setSyncFeedback] = React.useState(null);
   const [copyState, setCopyState] = React.useState(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
-  const sessionSync = target.sessionSync ?? { enabled: false, state: 'unavailable' };
-  const syncDescription = sessionSync.state === 'active'
-    ? '自动跟随该私聊的当前会话'
-    : sessionSync.state === 'waiting'
-      ? '等待该私聊建立新会话'
-      : sessionSync.state === 'unavailable'
-        ? '仅支持已经聊过、已建立当前会话且使用当前 Host Harness 的私聊目标'
-        : '关闭时不发送 DSH 会话消息';
   const testTarget = async () => {
     setAction('test');
     setTestState(null);
@@ -535,28 +535,6 @@ function TargetRow({ definition, target, botId, connected, rpcCall, onChanged, o
     }
   };
 
-  const setSessionSync = async (enabled) => {
-    setAction('sync');
-    setSyncFeedback(null);
-    try {
-      await rpcCall(DELIVERY_ENDPOINTS.sessionSync, {
-        botId,
-        targetId: target.targetId,
-        enabled,
-      });
-      await onChanged();
-    } catch (error) {
-      setSyncFeedback({
-        tone: 'error',
-        message: error?.code === 'session-sync-unavailable'
-          ? '会话同步仅支持已经聊过、已建立当前会话且使用当前 Host Harness 的私聊目标。'
-          : presentError(error, '会话同步设置失败，请稍后重试。'),
-      });
-    } finally {
-      setAction(null);
-    }
-  };
-
   return h('li', { className: 'dim-targetRow', 'data-target-id': target.targetId },
     h('div', { className: 'dim-targetSummary' },
       h('div', { className: 'dim-targetTitle' },
@@ -577,24 +555,7 @@ function TargetRow({ definition, target, botId, connected, rpcCall, onChanged, o
         onClick: () => setConfirmDelete(true),
         disabled: Boolean(action),
       }, '删除')),
-    h('label', { className: 'dim-targetSessionSync' },
-      h('span', { className: 'dim-targetSessionSyncCopy' },
-        h('strong', null, '会话双向同步'),
-        h('small', null, syncDescription)),
-      h('input', {
-        type: 'checkbox',
-        checked: sessionSync.enabled === true,
-        disabled: Boolean(action)
-          || (sessionSync.enabled !== true && sessionSync.state === 'unavailable'),
-        onChange: (event) => void setSessionSync(event.target.checked),
-        'aria-label': '会话双向同步',
-      })),
     copyState ? h('p', { className: 'dim-targetFeedback', role: 'status' }, copyState) : null,
-    syncFeedback ? h('p', {
-      className: 'dim-targetFeedback',
-      'data-tone': syncFeedback.tone,
-      role: 'alert',
-    }, syncFeedback.message) : null,
     testState ? h('p', {
       className: 'dim-targetFeedback',
       'data-tone': testState.tone,
@@ -604,8 +565,7 @@ function TargetRow({ definition, target, botId, connected, rpcCall, onChanged, o
     confirmDelete ? h('div', { className: 'dim-targetDeleteConfirm', role: 'alertdialog' },
       h('p', null,
         '删除 ', h('code', null, target.targetId),
-        '？使用这个 targetId 的外部调用将返回 unknown-target。',
-        sessionSync.enabled ? ' 会话同步设置也会一并删除。' : null),
+        '？使用这个 targetId 的外部调用将返回 unknown-target。'),
       h('div', { className: 'dim-targetFormActions' },
         h(DeliveryButton, {
           onClick: () => setConfirmDelete(false),

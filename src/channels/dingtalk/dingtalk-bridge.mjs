@@ -1,3 +1,5 @@
+import { setTimeout as wait } from 'node:timers/promises';
+import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import {
@@ -33,9 +35,6 @@ import {
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
 import {
-  applyReadDelay,
-  applySegmentGap,
-  SHORT_DELAY_CAP_MS,
 } from '../shared/send-delay.mjs';
 import { resolveHumanizeSettings } from '../shared/humanize-resolver.mjs';
 import {
@@ -657,7 +656,7 @@ export class DingtalkHarnessBridge {
     const commandText = nonEmptyString(promptMessage.content) ?? '';
     const addressed = String(message.conversationType) !== '2' || message?.isInAtList === true;
     const direct = String(message.conversationType) !== '2';
-    if (addressed) {
+    if (addressed || this.#harness?.multipleConnect?.mode() === 'external') {
       const access = evaluateInboundAccess(this.#accessPolicy, {
         conversationType,
         senderIds: sender,
@@ -667,10 +666,16 @@ export class DingtalkHarnessBridge {
         ...(isDingtalkMenuCommand(commandText) ? { isCommand: true } : {}),
       });
       if (!access.allowed) {
+        if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
         this.#acceptedMessageIds.set(messageId, null);
         return this.#finishAccessDecision(message, messageId, sessionWebhook, access);
       }
     }
+    if (captureExternal(this.#harness, () => ({
+      messageId, conversationId: key, senderId: sender,
+      kind: conversationType, text: commandText,
+      attachments: [...(promptMessage.images ?? []), ...(promptMessage.files ?? [])],
+    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
     this.#acceptedMessageIds.set(messageId, contextSnapshot === undefined ? captureContextEnhancement(
       this.#contextEnhancement,
       conversationType,
@@ -925,6 +930,8 @@ export class DingtalkHarnessBridge {
     if (!entry || entry.busy || entry.expiresAt <= Date.now()
       || callback?.userId !== senderStaffId(entry.message)) return Promise.resolve();
     const command = dingtalkMenuCommand(entry, callback);
+    if (this.#harness?.multipleConnect?.mode() === 'external'
+      || isMultipleConnectSessionCommand(this.#harness, command)) return;
     if (!command) return Promise.resolve();
     entry.busy = true;
     let task;
@@ -1333,13 +1340,6 @@ export class DingtalkHarnessBridge {
     return true;
   }
 
-  #idleMsFor(key) {
-    // null = no completed turn on record (first message): the activity
-    // boost then stays out of the way and the full read-delay range applies.
-    const lastTurnEnd = this.#turnEnds.get(key);
-    return lastTurnEnd === undefined ? null : Date.now() - lastTurnEnd;
-  }
-
   async #process(message, messageId, sender, key, {
     alreadyRecorded = false,
     preparedMessage,
@@ -1429,10 +1429,6 @@ export class DingtalkHarnessBridge {
       }
 
       const humanize = this.#humanizeSettings();
-      // ---- Phase ①: read delay（"过了一段时间才读到消息"）----
-      // Silent: no card placeholder, no reply. Abortable: a newer message
-      // (interrupt) or /stop supersedes the phase instead of waiting it out.
-      // Dingtalk has no typing API, so the wait is capped (SHORT_DELAY_CAP_MS).
       let content;
       let modelMessage;
       preAsk = new AbortController();
@@ -1441,13 +1437,6 @@ export class DingtalkHarnessBridge {
         ? AbortSignal.any([this.#signal, preAsk.signal])
         : preAsk.signal;
       try {
-        await applyReadDelay({
-          settings: humanize,
-          userText: text,
-          idleMs: this.#idleMsFor(key),
-          channelCapMs: SHORT_DELAY_CAP_MS,
-          signal: preAskSignal,
-        });
         if (preAsk.signal.aborted) {
           const superseded = new Error('superseded by a newer message');
           superseded.code = 'superseded';
@@ -1483,9 +1472,6 @@ export class DingtalkHarnessBridge {
         }));
         contextEnhanced = content !== originalContent;
       }
-      // ---- Phase ②: compose ----
-      // #streaming is now live: false disables the card stream entirely and
-      // delivers the final answer as a one-shot message.
       if (humanize.streaming
         && typeof this.#api.createAiCard === 'function'
         && typeof this.#api.updateAiCard === 'function'
@@ -1505,25 +1491,17 @@ export class DingtalkHarnessBridge {
         cardStarted = await cardStream.start(initialCardText);
         if (cardStarted) cardStartedAt = startedAt;
       }
-      // Create message_break handler for this turn. Segment gaps
-      // ("typing the next message") pause between segments.
-      let segmentsSent = 0;
+      let lastSegmentAt = 0;
+      const sendSegment = async (segmentText) => {
+        const remaining = 3000 - (Date.now() - lastSegmentAt);
+        if (remaining > 0) await wait(remaining, undefined, { signal: this.#signal ?? undefined });
+        const result = await this.#send(sessionWebhook, segmentText, this.#atUsersFor(message));
+        lastSegmentAt = Date.now();
+        return result;
+      };
       const messageBreakHandler = humanize.messageBreak
         ? createMessageBreakHandler({
-          sendSegment: async (segmentText) => {
-            if (segmentsSent > 0) {
-              await applySegmentGap({
-                settings: humanize,
-                segmentText,
-                // DingTalk webhooks are capped at ~20 messages/min; segment
-                // bursts below this floor risk a 10-minute rate-limit ban.
-                minSegmentGapMs: DINGTALK_MIN_SEGMENT_GAP_MS,
-                signal: this.#signal,
-              });
-            }
-            segmentsSent += 1;
-            await this.#send(sessionWebhook, segmentText, this.#atUsersFor(message));
-          },
+          sendSegment,
           logger: this.#logger,
         })
         : null;
@@ -1612,7 +1590,7 @@ export class DingtalkHarnessBridge {
           textReceipt = createDeliveryReceipt({
             deliveryId: messageId,
             presentation: 'dingtalk-text',
-            providerMessageIds: await this.#send(sessionWebhook, answerText, this.#atUsersFor(message)),
+            providerMessageIds: await sendSegment(answerText),
           });
         }
         try {

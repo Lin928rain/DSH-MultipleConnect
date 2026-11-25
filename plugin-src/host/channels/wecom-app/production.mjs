@@ -162,6 +162,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         initialAccessPolicy: initialAccessPolicyFor('wecom-app', botConfig),
       });
       const workspaceScope = createBotWorkspaceScope(harness, {
+        multipleConnect: config.multipleConnectRuntime,
         botId, workspaces, state, agentPresetCatalog,
       });
       return new Runtime({

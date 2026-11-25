@@ -1,8 +1,8 @@
 {
-  "name": "@johnnren/dsh-im-humanize",
-  "version": "4.38.0-humanize.2",
+  "name": "dsh-multiple-connect",
+  "version": "0.1.0",
   "icon": "./assets/logo-plugin-message-link-gradient.webp",
-  "description": "Humanized fork of @xmanrui/dsh-im (base 4.38.0) for DeepSeek Harness: humanized message delivery (send delay + typing two-phase), message_break + streaming coexistence, status reactions, reply quotes, per-bot overrides, and a no_reply reclaim tool. @xmanrui/dsh-im 的拟人化分支：人化发送（延迟+输入中两阶段）、message_break 与 streaming 共存、状态表情、回复引用、per-bot 全量覆盖。",
+  "description": "Connect messaging platforms to a shared DeepSeek Harness conversation and a persistent external inbox.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -25,22 +25,11 @@
     "matrix",
     "ai-office"
   ],
-  "author": "johnnren (humanized fork; upstream © xmanrui & contributors)",
+  "author": "DSH-MultipleConnect contributors (upstream xmanrui, johnnren and contributors)",
   "license": "MIT",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/xmanrui/dsh-im.git"
-  },
-  "homepage": "https://github.com/xmanrui/dsh-im#readme",
-  "bugs": {
-    "url": "https://github.com/xmanrui/dsh-im/issues"
-  },
   "publishConfig": {
     "access": "public"
-  },
-  "bin": {
-    "dsh-im": "bin/dsh-im.mjs"
   },
   "main": "./lib/index.js",
   "exports": {
@@ -51,7 +40,6 @@
   },
   "files": [
     "assets",
-    "bin",
     "cordis.patch.yml",
     "lib",
     "locale/*.json",
@@ -64,13 +52,12 @@
     "scripts/verify-session-channel-logos.mjs",
     "scripts/verify-session-title-prefix.mjs",
     "src",
-    "PROACTIVE_DELIVERY.md",
-    "PROACTIVE_DELIVERY.en.md",
-    "docs/client-integration.md",
     "LICENSE",
     "README.md",
     "README.en.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "vendor/proactive/LICENSE",
+    "vendor/proactive/src"
   ],
   "dsh": {
     "bundle": {
@@ -87,9 +74,9 @@
       "platform": "web"
     },
     "compatibility": {
-      "dsh": "0.2.0-rc.2",
+      "dsh": "0.2.1-rc.2",
       "dshReleases": {
-        "0.2.0-rc.2": "compatible"
+        "0.2.1-rc.2": "compatible"
       },
       "profiles": [
         "web"
@@ -105,6 +92,7 @@
     "node": ">=22.19"
   },
   "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.5",
     "@matrix-org/olm": "3.2.15",
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "1.0.4",
@@ -135,5 +123,11 @@
   "optionalDependencies": {
     "@tencent-qqmail/agently-cli": "^1.0.18",
     "sharp": "0.35.5"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2"
   }
 }

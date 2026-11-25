@@ -43,6 +43,7 @@ const DELIVERY_ERROR_CODES = new Set([
   'stale-route',
   'reply-result-unknown',
   'history-permission-denied',
+  'tool-send-disabled',
   'history-unavailable',
   'thread-unavailable',
   'untrusted-source',
@@ -519,7 +520,7 @@ export class DeliveryService {
     } catch (error) { throw publicOperationError(error); }
   }
 
-  async send(botId, targetIdOrDraft, text, { signal, format = 'plain' } = {}) {
+  async send(botId, targetIdOrDraft, text, { signal, format = 'plain', authorize } = {}) {
     const id = botIdOf(botId);
     const targetKey = typeof targetIdOrDraft === 'string'
       ? targetIdOf(targetIdOrDraft)
@@ -544,6 +545,7 @@ export class DeliveryService {
         if (!target) throw deliveryError('unknown-target', 'Unknown target');
       }
       cancellation(signal);
+      if (authorize && !authorize()) throw deliveryError('tool-send-disabled', 'Agent tool sending is disabled for this connection.');
       await adapter.sendText(id, target, text, {
         signal,
         ...(format === 'markdown' ? { format } : {}),

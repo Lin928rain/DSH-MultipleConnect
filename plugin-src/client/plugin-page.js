@@ -10,7 +10,7 @@ function OpenImAction({ subject, packageName, onOpen, t }) {
   if (subject.kind === 'row' && subject.row?.moduleName !== packageName) return null;
   return h('button', {
     type: 'button', className: 'dim-pluginOpen', onClick: onOpen,
-  }, t('打开 IM机器人'));
+  }, 'DSH-MultipleConnect');
 }
 
 function ImPluginPage({ renderPanel, onBack, t }) {

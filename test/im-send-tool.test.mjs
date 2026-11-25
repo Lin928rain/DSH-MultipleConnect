@@ -42,62 +42,12 @@ test('send_im surfaces delivery errors with their public code', async () => {
   );
 });
 
-test('send_im resolves the bound private chat when botId/targetId are omitted', async () => {
-  const calls = [];
-  const boundTarget = { kind: 'chat', route: { chatId: '6110538394' } };
-  const definition = createImSendToolDefinition({
-    send: async (botId, target, text, options) => {
-      calls.push({ botId, target, text, options });
-    },
-    resolveBoundTargets: async (sessionId) => (
-      sessionId === 'session-x' ? [{ botId: 'bot-a', target: boundTarget }] : []
-    ),
-  });
-  const signal = AbortSignal.timeout(1000);
-
-  const result = await definition.execute(
-    { text: '该喝水啦' },
-    { agent: { session: { id: 'session-x' } }, signal },
-  );
-
-  assert.deepEqual(result, { sent: true });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].botId, 'bot-a');
-  assert.equal(calls[0].target, boundTarget);
-  assert.equal(calls[0].text, '该喝水啦');
-  assert.equal(calls[0].options?.signal, signal);
-});
-
-test('send_im rejects with no-bound-target when the session is unbound', async () => {
-  const definition = createImSendToolDefinition({
-    send: async () => {},
-    resolveBoundTargets: async () => [],
-  });
-
-  await assert.rejects(
-    definition.execute({ text: 'hi' }, { agent: { session: { id: 'session-x' } } }),
-    /send_im failed \(no-bound-target\)/,
-  );
-});
-
-test('send_im rejects with no-session when no session context is available', async () => {
-  const definition = createImSendToolDefinition({
-    send: async () => {},
-    resolveBoundTargets: async () => [{ botId: 'bot-a', target: { kind: 'chat', route: { chatId: '1' } } }],
-  });
-
-  await assert.rejects(
-    definition.execute({ text: 'hi' }, {}),
-    /send_im failed \(no-session\)/,
-  );
-});
-
 test('send_im rejects a half-specified explicit target', async () => {
   const definition = createImSendToolDefinition({ send: async () => {} });
 
   await assert.rejects(
     definition.execute({ botId: 'bot-a', text: 'hi' }, {}),
-    /send_im failed \(bad-request\): provide both botId and targetId/,
+    /send_im failed \(bad-request\): botId, targetId and text are required/,
   );
 });
 
@@ -112,9 +62,9 @@ test('installImSendTool registers the tool and the prompt section, or refuses cl
 
   assert.equal(installImSendTool(ctx, { send }), true);
   assert.equal(registered[0].name, IM_SEND_TOOL);
-  assert.deepEqual(registered[0].parameters.required, ['text']);
-  assert.equal(sections[0].name, 'dsh-im:send-im');
-  assert.match(sections[0].text, /already delivered automatically/);
+  assert.deepEqual(registered[0].parameters.required, ['botId', 'targetId', 'text']);
+  assert.equal(sections[0].name, 'dsh-multiple-connect:send-im');
+  assert.match(sections[0].text, /originating IM chat receives it automatically/);
 
   assert.equal(installImSendTool({}, { send }), false);
   assert.equal(installImSendTool(ctx, {}), false);

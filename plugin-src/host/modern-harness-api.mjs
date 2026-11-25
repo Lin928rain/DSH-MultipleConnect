@@ -37,11 +37,12 @@ function rpcResult(request, operation) {
   );
 }
 
-function remoteRequest(namespace, method, args, signal) {
+function remoteRequest(namespace, method, args, signal, peer) {
   return {
     namespace,
     method,
     args,
+    ...(peer ? { peer } : {}),
     ...(signal === undefined ? {} : { signal }),
   };
 }
@@ -196,6 +197,7 @@ class MuxSubscription {
 
 class ModernHarnessApi {
   #gateway;
+  #peer;
   #deliveryService;
   #scope;
   #mux = new Set();
@@ -208,6 +210,7 @@ class ModernHarnessApi {
 
   constructor(ctx, gateway, scope) {
     this.#gateway = gateway;
+    this.#peer = (ctx.get?.('connection', false) ?? ctx.connection)?.browserPeer;
     this.#scope = scope;
 
     this.host = Object.freeze({
@@ -292,7 +295,7 @@ class ModernHarnessApi {
   }
 
   async #invoke(namespace, method, args, signal) {
-    return this.#gateway.invoke(remoteRequest(namespace, method, args, signal));
+    return this.#gateway.invoke(remoteRequest(namespace, method, args, signal, this.#peer));
   }
 
   async #streamFirst(namespace, method, args, signal) {
@@ -303,7 +306,7 @@ class ModernHarnessApi {
     let iterator;
     try {
       const source = await this.#gateway.stream(remoteRequest(
-        namespace, method, args, streamSignal,
+        namespace, method, args, streamSignal, this.#peer,
       ));
       iterator = source[Symbol.asyncIterator]();
       const first = await iterator.next();

@@ -23,13 +23,15 @@ import { installDeliveryHttp } from './delivery-http.mjs';
 import { createDeliveryService } from './delivery-service.mjs';
 import { installInboundTtlRpc } from './inbound-ttl-rpc.mjs';
 import { installInjectedContext } from './injected-context.mjs';
-import { installSessionSyncCoordinator } from './session-sync-coordinator.mjs';
+import { createMultipleConnect, installConnectRpc, connectDataDirectory } from './multiple-connect.mjs';
+import { installInboxTools } from './inbox-tools.mjs';
+import { createSnowlumaManager } from './snowluma.mjs';
+import { join } from 'node:path';
 import { installSessionTitlePrefix } from './session-title-prefix.mjs';
-import { installUpdateRpc } from './update-rpc.mjs';
 import { installHumanizeRpc } from './humanize-rpc.mjs';
 import { HUMANIZE_KEYS } from '../../src/channels/shared/humanize-settings.mjs';
 
-export const name = 'dsh-im-host';
+export const name = 'dsh-multiple-connect';
 export const inject = [
   'connection',
   'credentials',
@@ -47,7 +49,9 @@ function channelConfig(config, name, deliveryService) {
   const withAuthority = config.rpcAuthority === undefined
     ? channel
     : { ...channel, rpcAuthority: config.rpcAuthority };
-  const base = name === 'office' ? withAuthority : { ...withAuthority, deliveryService };
+  const base = name === 'office' ? withAuthority : {
+    ...withAuthority, deliveryService, multipleConnectRuntime: config.multipleConnectRuntime,
+  };
   const forwarded = {};
   for (const key of HUMANIZE_CONFIG_KEYS) {
     if (channel[key] !== undefined || config[key] !== undefined) {
@@ -66,13 +70,10 @@ function channelConfig(config, name, deliveryService) {
 export function createImHostPlugin(internals = {}) {
   const startHostLanguage = internals.installHostLanguage ?? installHostLanguage;
   const startHostLanguageRpc = internals.installHostLanguageRpc ?? installHostLanguageRpc;
-  const startUpdate = internals.installUpdateRpc ?? installUpdateRpc;
   const startInboundTtl = internals.installInboundTtlRpc ?? installInboundTtlRpc;
   const startInjectedContext = internals.installInjectedContext ?? installInjectedContext;
   const startDelivery = internals.installDeliveryRpc ?? installDeliveryRpc;
   const startDeliveryHttp = internals.installDeliveryHttp ?? installDeliveryHttp;
-  const startSessionSync = internals.installSessionSyncCoordinator
-    ?? installSessionSyncCoordinator;
   const makeDeliveryService = internals.createDeliveryService ?? createDeliveryService;
   const startFeishu = internals.applyFeishu ?? applyFeishu;
   const startWeixin = internals.applyWeixin ?? applyWeixin;
@@ -108,11 +109,9 @@ export function createImHostPlugin(internals = {}) {
     name,
     inject,
     async apply(ctx, config = {}) {
-      const unavailableSessionSyncChannels = channels
-        .map(([channel]) => channel)
-        .filter((channel) => channel !== 'office'
-          && config[channel]?.harnessBaseUrl !== undefined);
-      const deliveryService = makeDeliveryService({ unavailableSessionSyncChannels });
+      const deliveryService = makeDeliveryService({
+        unavailableSessionSyncChannels: [...channels.map(([channel]) => channel === 'wecomApp' ? 'wecom-app' : channel), 'snowluma'],
+      });
       if (typeof ctx?.provide === 'function') {
         ctx.provide('dshIm', Object.freeze({
           contractVersion: 1,
@@ -202,12 +201,45 @@ export function createImHostPlugin(internals = {}) {
       }
     }
 
-    const imSend = (botId, targetId, text, options) => (
-      deliveryService.send(botId, targetId, text, options)
-    );
-    const resolveBoundTargets = (sessionId) => (
-      deliveryService.listSessionConversations(sessionId)
-    );
+    const logger = typeof ctx?.logger === 'function' ? ctx.logger(name) : (ctx?.logger ?? console);
+    const runtime = typeof ctx?.workspaceController?.initializeDefault === 'function'
+      && typeof ctx?.sessionController?.create === 'function'
+      ? createMultipleConnect(ctx, config, deliveryService, { logger })
+      : undefined;
+    if (runtime) {
+      const snowluma = createSnowlumaManager({ ctx, config, runtime, deliveryService, logger });
+      ctx.effect(() => async () => {
+        await snowluma.close();
+        await runtime.close();
+      }, 'dsh-multiple-connect ingress');
+      config = { ...config, multipleConnectRuntime: runtime };
+      installConnectRpc(ctx, runtime, deliveryService, config, snowluma);
+      if (config.multipleConnect?.proactive !== false) {
+        ctx.inject(['agents', 'workspaceRegistry'], async (proactiveCtx) => {
+          try {
+            const { apply } = await import('../../vendor/proactive/src/index.ts');
+            const dispose = await apply(proactiveCtx, {
+              dataDir: join(connectDataDirectory(config), 'proactive'),
+              currentMain: async () => (await runtime.main.ensure())?.sessionId,
+              isMain: (id) => runtime.main.current()?.sessionId === id,
+              archived: (id) => proactiveCtx.get('workspaceRegistry', false)?.archivedSessionIds.includes(id),
+            });
+            proactiveCtx.effect(() => dispose, 'dsh-multiple-connect scheduler');
+          } catch (error) {
+            logger.error?.('[dsh-multiple-connect] proactive could not start:', error);
+          }
+        });
+      }
+    }
+    const imSend = (botId, targetId, text, options) => {
+      const authorize = () => runtime?.store.settings(botId).toolSend === true;
+      if (!authorize()) {
+        const error = new Error('Agent tool sending is disabled for this connection.');
+        error.code = 'tool-send-disabled';
+        throw error;
+      }
+      return deliveryService.send(botId, targetId, text, { ...options, authorize });
+    };
     const startTitlePrefix = (titleCtx) => {
       // The installer owns its cleanup through ctx.effect(). Cordis startup
       // callbacks must not return its controller object as an effect.
@@ -229,7 +261,8 @@ export function createImHostPlugin(internals = {}) {
           installMessageBreakTool(toolCtx);
         }
         if (config.imSendTool !== false) {
-          installImSendTool(toolCtx, { send: imSend, resolveBoundTargets });
+          installImSendTool(toolCtx, { send: imSend });
+          if (runtime) installInboxTools(toolCtx, runtime.store, deliveryService);
         }
       });
     } else {
@@ -239,12 +272,10 @@ export function createImHostPlugin(internals = {}) {
         installMessageBreakTool(ctx);
       }
       if (config.imSendTool !== false) {
-        installImSendTool(ctx, { send: imSend, resolveBoundTargets });
+        installImSendTool(ctx, { send: imSend });
+        if (runtime) installInboxTools(ctx, runtime.store, deliveryService);
       }
     }
-    const logger = typeof ctx?.logger === 'function'
-      ? ctx.logger(name)
-      : (ctx?.logger ?? console);
     try {
       startInjectedContext(ctx, { logger });
     } catch (error) {
@@ -257,11 +288,6 @@ export function createImHostPlugin(internals = {}) {
         } catch (error) {
           logger.error?.('[dsh-im] failed to activate interface language mirroring; continuing with channels', error);
         }
-      }
-      try {
-        startUpdate(ctx);
-      } catch (error) {
-        logger.error?.('[dsh-im] failed to activate update management; continuing with channels', error);
       }
       try {
         startInboundTtl(ctx, { config });
@@ -288,16 +314,7 @@ export function createImHostPlugin(internals = {}) {
     if (failures.length === channels.length) {
       throw new AggregateError(failures, 'dsh-im failed to activate every channel');
     }
-    if (typeof ctx?.on === 'function') {
-      try {
-        startSessionSync(ctx, deliveryService, {
-          logger,
-          inputScope: ctx.root ?? ctx,
-        });
-      } catch (error) {
-        logger.error?.('[dsh-im] failed to activate Session sync; continuing with channels', error);
-      }
-    }
+
   }
 }
 

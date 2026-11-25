@@ -119,12 +119,12 @@ test('web keeps its one bilingual settings entry, including hosts without provid
     const host = start(t, { provide });
     assert.equal(host.entries.size, 1);
     const { options, component } = [...host.entries][0];
-    assert.equal(options.id, 'xmanrui-dsh-im');
+    assert.equal(options.id, 'dsh-multiple-connect');
     assert.equal(options.order, 21);
-    assert.equal(options.label(), 'IM机器人');
+    assert.equal(options.label(), 'DSH-MultipleConnect');
     assert.equal(options.locale, 'dsh-im');
     const markup = renderToStaticMarkup(React.createElement(component));
-    assert.match(markup, /DSH-IM/);
+    assert.match(markup, /DSH-MultipleConnect/);
     assert.match(markup, /id="dim-panel-weixin"/);
     assert.equal(Boolean(host.service), provide);
     if (provide) {
@@ -263,7 +263,7 @@ test('embedded panel receives the same management calls and picker, ignoring inj
   for (const [name, value] of Object.entries(dependencies)) assert.equal(props[name], value, name);
   const before = host.calls.length;
   const signal = new AbortController().signal;
-  for (const name of ['feishuRpcCall', 'emailRpcCall', 'matrixRpcCall', 'updateRpcCall', 'deliveryRpcCall', 'globalSettingsRpcCall']) {
+  for (const name of ['feishuRpcCall', 'emailRpcCall', 'matrixRpcCall', 'connectRpcCall', 'deliveryRpcCall', 'globalSettingsRpcCall']) {
     props[name]('check', { test: true }, signal);
   }
   assert.equal(host.calls.length, before + 6);
@@ -271,7 +271,7 @@ test('embedded panel receives the same management calls and picker, ignoring inj
     ['dsh-im/feishu', { method: 'check', payload: { test: true } }, signal],
     ['dsh-im/email', { method: 'check', payload: { test: true } }, signal],
     ['dsh-im/matrix', { method: 'check', payload: { test: true } }, signal],
-    ['dsh-im/dsh-im', { method: 'check', payload: { test: true } }, signal],
+    ['dsh-im/dsh-multiple-connect', { method: 'check', payload: { test: true } }, signal],
     ['dsh-im/dsh-im-delivery', { method: 'check', payload: { test: true } }, signal],
     ['dsh-im/dsh-im-settings', { method: 'check', payload: { test: true } }, signal],
   ]);

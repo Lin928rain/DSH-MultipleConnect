@@ -1698,7 +1698,7 @@ export function observeBotWorkspaceRemovals(
 
 export function createBotWorkspaceScope(
   harness,
-  { botId, workspaces, state, agentPresetCatalog } = {},
+  { botId, workspaces, state, agentPresetCatalog, multipleConnect } = {},
 ) {
   if (!harness || !workspaces || !state) throw new TypeError('harness, workspaces, and state are required');
   const incarnation = workspaces.incarnationFor(botId);
@@ -1826,8 +1826,10 @@ export function createBotWorkspaceScope(
     return matches;
   }
 
+  const sharedConnection = multipleConnect?.connection(botId, harness);
   const scopedHarness = new Proxy(harness, {
     get(target, property) {
+      if (property === 'multipleConnect') return sharedConnection;
       if (property === 'agentPresetSettings') {
         return async (options = {}) => {
           options?.signal?.throwIfAborted();
@@ -2278,6 +2280,7 @@ export function createBotWorkspaceScope(
       if (property === 'sessionFor') {
         return (key, ...args) => {
           if (!isCurrentScope()) return null;
+          if (sharedConnection) return sharedConnection.activeTurns.get(key) ?? null;
           const sessionId = target.sessionFor(key, ...args);
           if (sessionId) {
             const entry = sessionGenerations.get(sessionId);

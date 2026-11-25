@@ -1,3 +1,4 @@
+import { releaseOutboundArtifact } from './semantic/artifact.mjs';
 import { withSessionBindingLock } from './session-binding-lock.mjs';
 import { initialSessionTitle } from './session-title.mjs';
 
@@ -103,6 +104,59 @@ export async function askInWorkspaceSession({
   askOptions,
   deferredDelivery,
 }) {
+  const connection = harness?.multipleConnect;
+  if (connection) {
+    const options = typeof askOptions === 'number' ? { timeoutMs: askOptions } : { ...askOptions };
+    const isCurrent = (sessionId) => connection.main.current()?.sessionId === sessionId;
+    const turn = ({ sessionId }) => submit(sessionId);
+    async function submit(sessionId) {
+      const discarded = { sessionId, answer: '', artifacts: [] };
+      if (!isCurrent(sessionId)) return undefined;
+      const artifacts = [];
+      const protect = (handler) => handler && ((...args) => {
+        if (isCurrent(sessionId)) return handler(...args);
+      });
+      const message = prepareContent
+        ? await prepareContent({ sessionId, content, text })
+        : content ?? text;
+      const origin = { type: 'text', text: '[IM source] ' + JSON.stringify({ botId: connection.botId, conversation: key }) };
+      const prompt = connection.botId && key
+        ? [...(Array.isArray(message) ? message : [{ type: 'text', text: message }]), origin]
+        : message;
+      if (!isCurrent(sessionId)) return undefined;
+
+      if (key) connection.activeTurns?.set(key, sessionId);
+      try {
+        const answer = await connection.harness.ask(sessionId, prompt, {
+          ...options,
+          sourceGuidance,
+          onUpdate: protect(options.onUpdate),
+          onInteraction: protect(options.onInteraction),
+          onInteractionResolved: protect(options.onInteractionResolved),
+          onArtifact: async (artifact) => {
+            if (!isCurrent(sessionId)) {
+              releaseOutboundArtifact(artifact);
+              return;
+            }
+            artifacts.push(artifact);
+            await options.onArtifact?.(artifact);
+          },
+        });
+        if (isCurrent(sessionId)) return { sessionId, answer, artifacts };
+      } catch (error) {
+        if (error?.code !== 'session-archived') throw error;
+        if (!error.promptAccepted) return undefined;
+      } finally {
+        if (key) connection.activeTurns?.delete(key);
+      }
+      for (const artifact of artifacts) releaseOutboundArtifact(artifact);
+      return discarded;
+    }
+    while (true) {
+      const result = await connection.main.run(turn, options.signal);
+      if (result) return result;
+    }
+  }
   const initialTitle = contextEnhanced
     ? initialSessionTitle({
         text: titleText ?? text,

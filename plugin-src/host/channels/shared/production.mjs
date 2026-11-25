@@ -175,6 +175,7 @@ export async function createTokenProductionController(ctx, config, internals, de
       const state = await stateFor(botId);
       await ensureWorkspace(botId, botConfig);
       const workspaceScope = createBotWorkspaceScope(harness, {
+        multipleConnect: config.multipleConnectRuntime,
         botId, workspaces, state, agentPresetCatalog,
       });
       const persistTokens = typeof definitions.persistBotCredential === 'function'

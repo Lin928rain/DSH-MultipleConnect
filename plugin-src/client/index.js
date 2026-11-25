@@ -1,3 +1,4 @@
+import { CONNECT_RPC, MultipleConnectSettings, SnowlumaSettings } from './multiple-connect-settings.js';
 import { callManagementRpc } from '../management-rpc.mjs';
 import * as React from 'react';
 import manifest from '../../package.json' with { type: 'json' };
@@ -85,7 +86,6 @@ import {
 } from './loopback-recovery.js';
 import { installImStyles } from './styles.js';
 import { installSessionChannelLogos } from './session-channel-logos.js';
-import { UpdatePanel, UPDATE_RPC_CHANNEL } from './update-panel.js';
 import { WorkspaceDirectoryPickerContext } from './workspace-editor.js';
 import { IMPanelErrorBoundary } from './panel-error-boundary.js';
 import { installImPluginPage } from './plugin-page.js';
@@ -110,6 +110,7 @@ const CHANNELS = Object.freeze([
   { id: 'dingtalk', label: '钉钉' },
   { id: 'wecom', label: '企业微信' },
   { id: 'qq', label: 'QQ' },
+  { id: 'snowluma', label: 'Snowluma' },
   { id: 'slack', label: 'Slack' },
   { id: 'telegram', label: 'Telegram' },
   { id: 'discord', label: 'Discord' },
@@ -194,7 +195,7 @@ function ChannelLogo({ channel }) {
   if (channel === 'dingtalk') return h(DingtalkLogo);
   if (channel === 'wecom') return h(WecomLogo);
   if (channel === 'wecomApp') return h(WecomAppLogo);
-  if (channel === 'qq') return h(QqLogo);
+  if (channel === 'qq' || channel === 'snowluma') return h(QqLogo);
   if (channel === 'slack') return h(SlackLogo);
   if (channel === 'telegram') return h(TelegramLogo);
   if (channel === 'discord') return h(DiscordLogo);
@@ -236,7 +237,8 @@ export function IMSettingsTab({
   weixinRpcCall,
   whatsappRpcCall,
   officeRpcCall,
-  updateRpcCall,
+  connectRpcCall,
+  openMainSession,
   deliveryRpcCall,
   globalSettingsRpcCall,
   humanizeRpcCall,
@@ -251,7 +253,6 @@ export function IMSettingsTab({
       ? preferredSectionId : 'weixin'
   ));
   const [loopbackRecovery, setLoopbackRecovery] = React.useState(null);
-  const [runningVersion, setRunningVersion] = React.useState(IM_PLUGIN_VERSION);
   const [deliverySettings, setDeliverySettings] = React.useState(null);
   // The Host owns email availability and reports it over RPC. The
   // mailbox entry point is omitted entirely while it is closed, and the visible
@@ -261,7 +262,6 @@ export function IMSettingsTab({
     () => CHANNELS.filter((channel) => channel.id !== 'email' || emailEnabled),
     [emailEnabled],
   );
-  const githubTooltipId = React.useId();
   const generalSettingsTooltipId = React.useId();
   const globalSettingsSelected = selected === GLOBAL_SETTINGS_TAB_ID;
   const active = visibleChannels.find((channel) => channel.id === selected) ?? visibleChannels[0];
@@ -273,9 +273,6 @@ export function IMSettingsTab({
     : `dim-panel-${active.id}`;
   const reportLoopbackRecovery = React.useCallback((recovery) => {
     setLoopbackRecovery((current) => current?.url === recovery.url ? current : recovery);
-  }, []);
-  const reportUpdateStatus = React.useCallback((snapshot) => {
-    setRunningVersion(snapshot.runningVersion);
   }, []);
   const rpcCalls = React.useMemo(() => createLoopbackAwareRpcCalls({
     dingtalkRpcCall,
@@ -289,7 +286,6 @@ export function IMSettingsTab({
     weixinRpcCall,
     whatsappRpcCall,
     officeRpcCall,
-    updateRpcCall,
     deliveryRpcCall,
     globalSettingsRpcCall,
     humanizeRpcCall,
@@ -315,7 +311,6 @@ export function IMSettingsTab({
     reportLoopbackRecovery,
     slackRpcCall,
     telegramRpcCall,
-    updateRpcCall,
     wecomRpcCall,
     wecomAppRpcCall,
     weixinRpcCall,
@@ -329,39 +324,10 @@ export function IMSettingsTab({
     h('header', { className: 'dim-title' },
       h('div', { className: 'dim-brand' },
         h('div', { className: 'dim-brandHeading' },
-          h('strong', { className: 'dim-brandName' }, 'DSH-IM'),
-          h('span', { className: 'dim-brandVersion' }, `v${runningVersion}`)),
+          h('strong', { className: 'dim-brandName' }, 'DSH-MultipleConnect'),
+          h('span', { className: 'dim-brandVersion' }, `v${IM_PLUGIN_VERSION}`)),
         h('p', null, '让 DeepSeek Harness 触手可及')),
       h('div', { className: 'dim-titleActions' },
-        h(UpdatePanel, {
-          rpcCall: rpcCalls.updateRpcCall,
-          clientVersion: IM_PLUGIN_VERSION,
-          onStatus: reportUpdateStatus,
-        }),
-      h('span', { className: 'dim-githubAction' },
-        h('a', {
-          className: 'dim-githubLink',
-          href: 'https://github.com/xmanrui/dsh-im',
-          target: '_blank',
-          rel: 'noopener noreferrer',
-          'aria-label': 'dsh-im GitHub',
-          'aria-describedby': githubTooltipId,
-        },
-        h('svg', {
-          width: 18,
-          height: 18,
-          viewBox: '0 0 16 16',
-          fill: 'currentColor',
-          focusable: 'false',
-          'aria-hidden': 'true',
-        }, h('path', {
-          d: 'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z',
-        }))),
-        h('span', {
-          id: githubTooltipId,
-          className: 'dim-githubTooltip',
-          role: 'tooltip',
-        }, '帮助与反馈 · 前往 GitHub')),
       h('span', { className: 'dim-generalSettingsAction' },
         h('button', {
           type: 'button',
@@ -418,6 +384,7 @@ export function IMSettingsTab({
       h(BotSettingsContext.Provider, { value: botSettingsContext },
         globalSettingsSelected
           ? h('div', { className: 'dim-globalSettingsStack' },
+              h(MultipleConnectSettings, { rpc: connectRpcCall, openSession: openMainSession }),
               h(GlobalSettingsPanel, { rpcCall: rpcCalls.globalSettingsRpcCall }),
               h(HumanizeSettingsPanel, { rpcCall: rpcCalls.humanizeRpcCall }),
             )
@@ -429,6 +396,8 @@ export function IMSettingsTab({
               accessRpcCall: rpcCalls[`${active.id}RpcCall`],
               onBack: () => setDeliverySettings(null),
             })
+          : active.id === 'snowluma'
+            ? h(SnowlumaSettings, { rpc: connectRpcCall, openDelivery: setDeliverySettings })
           : active.id === 'weixin'
             ? h(WeixinSettingsTab, { rpcCall: rpcCalls.weixinRpcCall })
             : active.id === 'feishu'
@@ -531,8 +500,15 @@ export function apply(ctx) {
     callManagementRpc(ctx.connection, SLACK_RPC_CHANNEL, endpoint, payload, signal);
   const officeRpcCall = (endpoint, payload, signal) =>
     callManagementRpc(ctx.connection, OFFICE_RPC_CHANNEL, endpoint, payload, signal);
-  const updateRpcCall = (endpoint, payload, signal) =>
-    callManagementRpc(ctx.connection, UPDATE_RPC_CHANNEL, endpoint, payload, signal);
+  const connectRpcCall = (endpoint, payload, signal) =>
+    callManagementRpc(ctx.connection, CONNECT_RPC, endpoint, payload, signal);
+  const openMainSession = (id) => ctx.get('uiWorkspace', false)?.openSession(id);
+  if (typeof window !== 'undefined' && typeof ctx.inject === 'function') {
+    ctx.inject(['slots', 'remote', 'connection', 'locale'], async (clientCtx) => {
+      const { apply } = await import('../../vendor/proactive/src/client/index.ts');
+      apply(clientCtx);
+    });
+  }
   const deliveryRpcCall = (endpoint, payload, signal) =>
     callManagementRpc(ctx.connection, DELIVERY_RPC_CHANNEL, endpoint, payload, signal);
   const globalSettingsRpcCall = (endpoint, payload, signal) =>
@@ -560,10 +536,11 @@ export function apply(ctx) {
     officeRpcCall,
     emailRpcCall,
     matrixRpcCall,
-    updateRpcCall,
     deliveryRpcCall,
     globalSettingsRpcCall,
     humanizeRpcCall,
+    connectRpcCall,
+    openMainSession,
     workspaceDirectoryPicker,
   };
   const subscribeLocale = (listener) => typeof ctx.on === 'function'
@@ -602,9 +579,9 @@ export function apply(ctx) {
       stopSettings = ctx.slots.inject('settings.section', () => {
         const unregister = ctx.slots.register({
           name: 'settings.section',
-          id: 'xmanrui-dsh-im',
+          id: 'dsh-multiple-connect',
           order: 21,
-          label: () => t('IM机器人'),
+          label: () => 'DSH-MultipleConnect',
           locale: IM_LOCALE_NAMESPACE,
           inject: () => panelDependencies,
         }, buildPanelElement);

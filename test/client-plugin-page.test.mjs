@@ -100,11 +100,11 @@ test('detail action opens the shared IM panel and returns to this plugin in both
   let renderer;
   t.after(() => act(() => renderer?.unmount()));
   act(() => { renderer = create(host.element('plugins.detail.actions', { subject: bundle })); });
-  assert.deepEqual(renderer.root.findByType('button').children, ['打开 IM机器人']);
+  assert.deepEqual(renderer.root.findByType('button').children, ['DSH-MultipleConnect']);
   act(() => renderer.update(host.element('plugins.detail.actions', { subject: bundle }, 'en')));
   const open = renderer.root.findByType('button');
   assert.equal(open.props.type, 'button');
-  assert.deepEqual(open.children, ['Open IM bots']);
+  assert.deepEqual(open.children, ['DSH-MultipleConnect']);
   act(() => open.props.onClick());
   assert.deepEqual(host.selected, [IM_MAIN_PANEL_ID]);
   act(() => renderer.update(host.element('main', {}, 'en')));

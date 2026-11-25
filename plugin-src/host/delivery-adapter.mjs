@@ -19,6 +19,7 @@ const CHANNELS = new Set([
   'imessage',
   'email',
   'matrix',
+  'snowluma',
 ]);
 
 export function supportsDeliveryChannel(channel) {
@@ -90,6 +91,14 @@ function normalizeRoute(channel, kind, route) {
     case 'wecom-app':
       oneOf(kind, ['user']);
       return routeWithStrings(route, ['chatId']);
+    case 'snowluma': {
+      oneOf(kind, ['user', 'group']);
+      const result = routeWithStrings(route, ['chatId']);
+      if (!/^\d{1,16}$/.test(result.chatId) || !Number.isSafeInteger(Number(result.chatId)) || Number(result.chatId) <= 0) {
+        throw invalidTarget('route.chatId must be a positive QQ ID');
+      }
+      return result;
+    }
     case 'qq':
       oneOf(kind, ['user', 'group']);
       return routeWithStrings(route, kind === 'user' ? ['userOpenId'] : ['groupOpenId']);

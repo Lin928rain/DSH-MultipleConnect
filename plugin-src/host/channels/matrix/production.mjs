@@ -149,6 +149,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         initialAccessPolicy: initialAccessPolicyFor('matrix', botConfig),
       });
       const workspaceScope = createBotWorkspaceScope(harness, {
+        multipleConnect: config.multipleConnectRuntime,
         botId, workspaces, state, agentPresetCatalog,
       });
       const e2eeMode = String(botConfig?.e2eeMode ?? 'optional').trim().toLowerCase();

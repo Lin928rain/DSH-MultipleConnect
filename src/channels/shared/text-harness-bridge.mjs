@@ -1,3 +1,5 @@
+import { setTimeout as wait } from 'node:timers/promises';
+import { captureExternal, isMultipleConnectSessionCommand } from './multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from './busy-message-dispatcher.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -77,9 +79,6 @@ import { createMessageBreakHandler } from './message-break.mjs';
 import { isSupersededStop } from './message-mode.mjs';
 import { resolveHumanizeSettings } from './humanize-resolver.mjs';
 import {
-  applyReadDelay,
-  applySegmentGap,
-  SHORT_DELAY_CAP_MS,
 } from './send-delay.mjs';
 import { createTypingSession } from './typing-session.mjs';
 
@@ -279,7 +278,8 @@ export class TextHarnessBridge {
     }
     // Preserve the channel trigger boundary. Access policy never turns an
     // unaddressed group message into a denial reply.
-    if (kind === 'group' && normalized.addressed !== true) {
+    if (kind === 'group' && normalized.addressed !== true
+      && this.#harness?.multipleConnect?.mode() !== 'external') {
       this.#status.messagesRejected += 1;
       this.#status.lastRejectedAt = new Date().toISOString();
       this.#acceptedMessageIds.set(messageId, null);
@@ -300,6 +300,7 @@ export class TextHarnessBridge {
         hasFiles,
       });
       if (!decision.allowed) {
+        if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
         this.#status.messagesRejected += 1;
         this.#status.lastRejectedAt = new Date().toISOString();
         // Mark policy denials so a webhook replay cannot repeat local work or
@@ -315,6 +316,10 @@ export class TextHarnessBridge {
         );
       }
     }
+    if (captureExternal(this.#harness, () => ({
+      messageId, conversationId, senderId, kind, text: normalized.text ?? normalized.content,
+      attachments: [...(normalized.images ?? []), ...(normalized.files ?? [])],
+    })) || isMultipleConnectSessionCommand(this.#harness, controlTextOf(normalized))) return Promise.resolve();
     this.#acceptedMessageIds.set(messageId, contextSnapshot === undefined
       ? captureContextEnhancement(this.#contextEnhancement, message?.kind)
       : contextSnapshot);
@@ -770,13 +775,6 @@ export class TextHarnessBridge {
    * (for the sendDelay activity boost). A first-ever message has no
    * activity record and always uses the full range.
    */
-  #idleMsFor(key) {
-    // null = no completed turn on record (first message): the activity
-    // boost then stays out of the way and the full read-delay range applies.
-    const lastTurnEnd = this.#turnEnds.get(key);
-    return lastTurnEnd === undefined ? null : Date.now() - lastTurnEnd;
-  }
-
   async #process(message, messageId, senderId, conversationKey, {
     alreadyRecorded = false,
   } = {}) {
@@ -1015,13 +1013,6 @@ export class TextHarnessBridge {
         return true;
       };
 
-      // ---- Phase ①: read delay（"过了一段时间才读到消息"）----
-      // Silent: no typing indicator, no read receipts, no harness activity.
-      // All command / approval / error paths return above and are never
-      // delayed. The pre-ask controller makes the phase abortable: a newer
-      // message (interrupt) or /stop supersedes the whole phase instead of
-      // waiting it out. Channels without any typing API cap the silence at
-      // SHORT_DELAY_CAP_MS — a long dead chat looks broken there.
       preAsk = new AbortController();
       this.#preAskControllers.set(conversationKey, preAsk);
       const preAskSignal = this.#signal
@@ -1031,18 +1022,6 @@ export class TextHarnessBridge {
       // ("打字、思考的断续"), bound to this turn and stopped in finally.
       typingSession = null;
       try {
-        await applyReadDelay({
-          settings: humanize,
-          userText: text,
-          idleMs: this.#idleMsFor(conversationKey),
-          channelCapMs: typeof this.#bot.sendTyping === 'function'
-            ? undefined
-            : SHORT_DELAY_CAP_MS,
-          signal: preAskSignal,
-        });
-        // ---- Phase ②: compose（"打字、思考的断续"）----
-        // The indicator opens only after the silence and then covers
-        // generation, segment gaps and pending-interaction waits.
         if (humanize.typingIndicator !== 'off' && typeof this.#bot.sendTyping === 'function') {
           typingSession = createTypingSession({
             sendTyping: (action) => this.#bot.sendTyping(target, action),
@@ -1051,8 +1030,7 @@ export class TextHarnessBridge {
               : null,
             refreshMs: this.#descriptor.typing?.refreshMs ?? 4000,
             darkResidualMs: this.#descriptor.typing?.darkResidualMs ?? 0,
-            mode: humanize.typingIndicator,
-            burst: humanize.typingBurst,
+            mode: 'continuous',
             logger: this.#logger,
             signal: this.#signal,
           });
@@ -1093,6 +1071,7 @@ export class TextHarnessBridge {
       // session keeps glowing through the gap and restarts its on-phase after
       // each send.
       let segmentsSent = 0;
+      let lastSegmentAt = 0;
       const messageBreakHandler = humanize.messageBreak
         ? createMessageBreakHandler({
           sendSegment: async (segmentText) => {
@@ -1118,20 +1097,13 @@ export class TextHarnessBridge {
               return;
             }
             if (segmentsSent > 0) {
-              // restartOn → sleep → send (plan §6.3): the indicator covers
-              // the gap and the upcoming send, and there is no trailing
-              // restartOn after the final segment (channels without a cancel
-              // API would glow for the platform residual with no follow-up).
               await typingSession?.restartOn();
-              await applySegmentGap({
-                settings: humanize,
-                segmentText,
-                minSegmentGapMs: this.#descriptor.minSegmentGapMs ?? 0,
-                signal: this.#signal,
-              });
+              const remaining = (this.#descriptor.minSegmentGapMs ?? 0) - (Date.now() - lastSegmentAt);
+              if (remaining > 0) await wait(remaining, undefined, { signal: this.#signal ?? undefined });
             }
             segmentsSent += 1;
             const sent = await this.#bot.sendText(target, segmentText);
+            lastSegmentAt = Date.now();
             return sent;
           },
           logger: this.#logger,

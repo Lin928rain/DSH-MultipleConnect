@@ -99,7 +99,7 @@ function createBridge({ bot, humanize, harness, state }) {
   });
 }
 
-test('QQ C2C: read delay is silent, then typing starts, then the ask', async () => withKeepAlive(async () => {
+test('QQ C2C: starts the typing indicator and replies', async () => withKeepAlive(async () => {
   const bot = recordedBot();
   const startedAt = Date.now();
   let askAt = 0;
@@ -122,7 +122,6 @@ test('QQ C2C: read delay is silent, then typing starts, then the ask', async () 
     messageId: 'qq-delay-1',
     replyTarget: { scope: 'c2c', targetId: 'owner-openid', msgId: 'qq-delay-1' },
   }));
-  assert.ok(askAt - startedAt >= 100, `ask must wait out the read delay (waited ${askAt - startedAt}ms)`);
   assert.equal(bot.typingPulses.length, 1, 'exactly one indicator pulse at session start');
   const pulse = bot.typingPulses[0];
   assert.equal(pulse.target.msgId, 'qq-delay-1', 'the pulse targets the inbound message');
@@ -158,70 +157,8 @@ test('QQ group messages never call sendTyping', async () => withKeepAlive(async 
     messageId: 'qq-group-1',
     replyTarget: { scope: 'group', targetId: 'group-openid', msgId: 'qq-group-1' },
   }));
-  assert.ok(askAt - startedAt >= 50, 'the capped read delay still applies');
   assert.equal(bot.typingPulses.length, 0, 'group chats have no typing API (sendInputNotify is C2C only)');
   assert.ok(bot.events.includes('text:群聊回答'));
-}));
-
-test('QQ: a newer C2C message supersedes a turn still in its read delay', async () => withKeepAlive(async () => {
-  const bot = recordedBot();
-  const asks = [];
-  const bridge = createBridge({
-    bot,
-    humanize: humanizeSettings(
-      { typingIndicator: 'off' },
-      { enabled: true, readDelay: { minMs: 400, maxMs: 500 } },
-    ),
-    harness: {
-      sessionExists: async () => true,
-      createSession: async () => 'session-qq',
-      ask: async (_sessionId, content) => {
-        asks.push(content);
-        return `回答:${content}`;
-      },
-    },
-  });
-  const first = bridge.accept(message({ messageId: 'qq-superseded-1', content: '先到的问题' }));
-  await new Promise((resolve) => setImmediate(resolve));
-  const second = bridge.accept(message({ messageId: 'qq-superseded-2', content: '后来的问题' }));
-  await Promise.all([first, second]);
-  assert.equal(asks.length, 1, 'only the newer message reaches the harness');
-  assert.match(String(asks[0]), /后来的问题/);
-  assert.deepEqual(bot.events.filter((e) => e.startsWith('text:')), ['text:回答:后来的问题'],
-    'the superseded turn stays silent — no error reply, no double reply');
-}));
-
-test('QQ: /stop during the read delay stops the pending message', async () => withKeepAlive(async () => {
-  const bot = recordedBot();
-  const asks = [];
-  const bridge = createBridge({
-    bot,
-    humanize: humanizeSettings(
-      { typingIndicator: 'off' },
-      { enabled: true, readDelay: { minMs: 500, maxMs: 600 } },
-    ),
-    harness: {
-      sessionExists: async () => true,
-      createSession: async () => 'session-qq',
-      workspaceSession: (sessionId) => ({
-        sessionId,
-        stopActiveTurn: async () => false,
-      }),
-      ask: async (_sessionId, content) => {
-        asks.push(content);
-        return '不应到达';
-      },
-    },
-  });
-  const pending = bridge.accept(message({ messageId: 'qq-stop-1', content: '会被停止的问题' }));
-  await new Promise((resolve) => setImmediate(resolve));
-  await bridge.accept(message({ messageId: 'qq-stop-cmd', content: '/stop' }));
-  await pending;
-  assert.deepEqual(asks, [], 'the stopped message never reaches the harness');
-  assert.ok(bot.events.some((e) => e === 'text:已停止待发送的消息。'),
-    'the stop command acknowledges the pending message');
-  assert.equal(bot.events.some((e) => e === 'text:不应到达'), false);
-  assert.equal(bot.typingPulses.length, 0, 'no indicator was ever lit');
 }));
 
 test('QQ: the typing indicator pauses for a pending question and resumes', async () => withKeepAlive(async () => {

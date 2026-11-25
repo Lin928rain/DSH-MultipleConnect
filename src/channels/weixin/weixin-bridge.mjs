@@ -1,3 +1,4 @@
+import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import {
@@ -39,8 +40,6 @@ import {
 import { runWorkspaceCommand } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
 import {
-  applyReadDelay,
-  applySegmentGap,
 } from '../shared/send-delay.mjs';
 import { resolveHumanizeSettings } from '../shared/humanize-resolver.mjs';
 import {
@@ -426,6 +425,7 @@ export class WeixinHarnessBridge {
         ? { allowed: true, reason: 'legacy-owner' }
         : { allowed: false, reason: 'sender-not-allowed' };
     if (!access.allowed) {
+      if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(messageId, sender, message, access);
     }
@@ -455,6 +455,14 @@ export class WeixinHarnessBridge {
       seq: message.seq,
       messageTimeMs: message.create_time_ms ?? weixinMessageTimestampMs(messageId),
     }).catch((error) => this.#logger.warn?.('[dsh-weixin] failed to persist conversation context:', error));
+    if (captureExternal(this.#harness, () => ({
+      messageId, conversationId: sender, senderId: sender, text: commandText,
+      attachments: message.item_list?.filter(({ type }) => type !== 1).map(({ type }) => ({ type: String(type) })),
+      receivedAt: message.create_time_ms,
+    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) {
+      this.#acceptedMessageIds.delete(messageId);
+      return Promise.resolve();
+    }
     const runId = nonEmptyString(message?.run_id) ?? undefined;
     const pending = this.#pendingInteractions.get(key);
     const batchCommand = isBatchInputCommand(commandText);
@@ -828,13 +836,6 @@ export class WeixinHarnessBridge {
     return true;
   }
 
-  #idleMsFor(key) {
-    // null = no completed turn on record (first message): the activity
-    // boost then stays out of the way and the full read-delay range applies.
-    const lastTurnEnd = this.#turnEnds.get(key);
-    return lastTurnEnd === undefined ? null : Date.now() - lastTurnEnd;
-  }
-
   async #process(message, key, {
     alreadyRecorded = false,
     preparedMessage,
@@ -918,30 +919,6 @@ export class WeixinHarnessBridge {
       // a long delay must not re-enqueue the same message as a new turn.
       await this.#state.markSeen(messageId);
       promptRecorded = true;
-      // ---- Phase ①: read delay（"过了一段时间才读到消息"）----
-      // Silent: no typing ticket, no keepalive. Abortable: a newer message
-      // (interrupt) or /stop supersedes the phase instead of waiting it out.
-      preAsk = new AbortController();
-      this.#preAskControllers.set(key, preAsk);
-      const preAskSignal = this.#signal
-        ? AbortSignal.any([this.#signal, preAsk.signal])
-        : preAsk.signal;
-      try {
-        await applyReadDelay({
-          settings: humanize,
-          userText: text,
-          idleMs: this.#idleMsFor(key),
-          // Long tier (plan §6.2): WeChat has a ticket typing indicator that
-          // explains the whole wait once the silence ends, like TG/DC/WA.
-          signal: preAskSignal,
-        });
-      } finally {
-        if (this.#preAskControllers.get(key) === preAsk) {
-          this.#preAskControllers.delete(key);
-        }
-      }
-      // ---- Phase ②: compose ----
-      // The typing ticket/keepalive opens only after the silence.
       await this.#startTyping(sender, contextToken);
       try {
         let content = hasImages || hasReply
@@ -960,18 +937,9 @@ export class WeixinHarnessBridge {
         // Create message_break handler for this turn. Segment gaps
         // ("typing the next message") pause between segments and the
         // keepalive relights after each send.
-        let segmentsSent = 0;
         messageBreakHandler = humanize.messageBreak
           ? createMessageBreakHandler({
             sendSegment: async (segmentText) => {
-              if (segmentsSent > 0) {
-                await applySegmentGap({
-                  settings: humanize,
-                  segmentText,
-                  signal: this.#signal,
-                });
-              }
-              segmentsSent += 1;
               const sent = await this.#send(sender, segmentText, contextToken, runId);
               await this.#resumeTyping(key, sender, contextToken);
               return sent;

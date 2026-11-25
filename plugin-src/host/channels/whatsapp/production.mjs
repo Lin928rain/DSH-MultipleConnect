@@ -135,6 +135,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         initialAccessPolicy: initialAccessPolicyFor('whatsapp', botConfig),
       });
       const workspaceScope = createBotWorkspaceScope(harness, {
+        multipleConnect: config.multipleConnectRuntime,
         botId, workspaces, state, agentPresetCatalog,
       });
       return new Runtime({

@@ -101,7 +101,7 @@ test('Host composes IM channels and the AI Office connector inside one plugin co
 
   await plugin.apply(ctx, config);
 
-  assert.equal(name, 'dsh-im-host');
+  assert.equal(name, 'dsh-multiple-connect');
   assert.deepEqual(inject, [
     'connection',
     'credentials',
@@ -127,7 +127,8 @@ test('Host composes IM channels and the AI Office connector inside one plugin co
   ]);
   for (const [channel, ctxArg, channelConfigArg] of calls) {
     assert.equal(ctxArg, ctx, `${channel} receives the shared context`);
-    const { humanizeDefaults, ...rest } = channelConfigArg;
+    const { humanizeDefaults, multipleConnectRuntime, ...rest } = channelConfigArg;
+    assert.equal(multipleConnectRuntime, undefined);
     assert.equal(typeof humanizeDefaults, 'function', `${channel} gets the live accessor`);
     assert.deepEqual(
       Object.keys(humanizeDefaults(channel)).sort(),

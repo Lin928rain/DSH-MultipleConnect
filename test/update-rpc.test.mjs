@@ -52,7 +52,7 @@ test('aborting a submitted browser request does not cancel the Host installation
   assert.deepEqual(await result, { ok: true, value: { job: { state: 'installing' } } });
 });
 
-test('Host update initialization failure leaves all channel activations available', async () => {
+test('Host does not mount the upstream package updater', async () => {
   const calls = [];
   const channels = ['Feishu', 'Weixin', 'Dingtalk', 'Wecom', 'WecomApp', 'Qq', 'Slack', 'Telegram', 'Discord', 'Whatsapp', 'IMessage', 'Email', 'Matrix', 'Office'];
   const internals = Object.fromEntries(channels.map((channel) => [`apply${channel}`, async () => calls.push(channel)]));
@@ -66,6 +66,5 @@ test('Host update initialization failure leaves all channel activations availabl
     connection: { fetch: {} }, logger: { error: (...args) => errors.push(args) },
   });
   assert.deepEqual(calls, channels);
-  assert.equal(errors.length, 1);
-  assert.match(errors[0][0], /update management/);
+  assert.deepEqual(errors, []);
 });

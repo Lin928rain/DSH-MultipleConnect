@@ -20,6 +20,11 @@ const externalRuntimePackages = [
   'qrcode',
   'sharp',
   'undici',
+  '@deepseek-ai/dsh-agent',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-session',
+  '@deepseek-ai/dsh-tools',
+  '@deepseek-ai/schemastery',
 ];
 const external = externalRuntimePackages.flatMap((name) => [name, `${name}/*`]);
 

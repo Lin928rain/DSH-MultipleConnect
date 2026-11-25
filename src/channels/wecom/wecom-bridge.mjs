@@ -1,3 +1,4 @@
+import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { imageInputLimits } from '../shared/image-input-policy.mjs';
 import { imageDownloadLimitMessage } from '../shared/image-prompt.mjs';
@@ -38,9 +39,6 @@ import {
 import { runWorkspaceCommand, workspacePathSnapshot } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
 import {
-  applyReadDelay,
-  applySegmentGap,
-  SHORT_DELAY_CAP_MS,
 } from '../shared/send-delay.mjs';
 import { resolveHumanizeSettings } from '../shared/humanize-resolver.mjs';
 import {
@@ -929,9 +927,14 @@ export class WecomHarnessBridge {
         ? { isCommand: true } : {}),
     });
     if (!access.allowed) {
+      if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(frame, messageId, chatId, access);
     }
+    if (captureExternal(this.#harness, () => ({
+      messageId, conversationId: key, senderId, kind: conversationType, text: commandText,
+      attachments: [...(commandMessage.images ?? []), ...(commandMessage.files ?? [])],
+    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
     this.#acceptedMessageIds.set(messageId, captureContextEnhancement(
       this.#contextEnhancement,
       conversationType,
@@ -1345,13 +1348,6 @@ export class WecomHarnessBridge {
     return true;
   }
 
-  #idleMsFor(key) {
-    // null = no completed turn on record (first message): the activity
-    // boost then stays out of the way and the full read-delay range applies.
-    const lastTurnEnd = this.#turnEnds.get(key);
-    return lastTurnEnd === undefined ? null : Date.now() - lastTurnEnd;
-  }
-
   async #process(frame, {
     alreadyRecorded = false,
     preparedMessage,
@@ -1443,10 +1439,6 @@ export class WecomHarnessBridge {
       // the delay must never enqueue the same message as a second turn.
       await this.#state.markSeen(messageId);
       promptRecorded = true;
-      // ---- Phase ①: read delay（"过了一段时间才读到消息"）----
-      // Silent: no thinking placeholder, no reply. Abortable: a newer
-      // message (interrupt) or /stop supersedes the phase instead of
-      // waiting it out. WeCom has no typing API, so the wait is capped.
       let content;
       preAsk = new AbortController();
       this.#preAskControllers.set(key, preAsk);
@@ -1454,13 +1446,6 @@ export class WecomHarnessBridge {
         ? AbortSignal.any([this.#signal, preAsk.signal])
         : preAsk.signal;
       try {
-        await applyReadDelay({
-          settings: humanize,
-          userText: text,
-          idleMs: this.#idleMsFor(key),
-          channelCapMs: SHORT_DELAY_CAP_MS,
-          signal: preAskSignal,
-        });
         if (preAsk.signal.aborted) {
           const superseded = new Error('superseded by a newer message');
           superseded.code = 'superseded';
@@ -1490,9 +1475,6 @@ export class WecomHarnessBridge {
         }));
         contextEnhanced = content !== originalContent;
       }
-      // ---- Phase ②: compose ----
-      // #streaming is now live: false skips the thinking-placeholder stream
-      // entirely; the final answer is a one-shot passive-first delivery.
       streamId = this.#generateReqId('stream');
       // progressStatus=false: defer the stream opening until the first real
       // text arrives (lazy) — no empty/placeholder streaming bubble is sent
@@ -1512,18 +1494,9 @@ export class WecomHarnessBridge {
       }
       // Create message_break handler for this turn. Segment gaps
       // ("typing the next message") pause between segments.
-      let segmentsSent = 0;
       const messageBreakHandler = humanize.messageBreak
         ? createMessageBreakHandler({
           sendSegment: async (segmentText) => {
-            if (segmentsSent > 0) {
-              await applySegmentGap({
-                settings: humanize,
-                segmentText,
-                signal: this.#signal,
-              });
-            }
-            segmentsSent += 1;
             await this.#sendActive(chatId, segmentText);
           },
           logger: this.#logger,

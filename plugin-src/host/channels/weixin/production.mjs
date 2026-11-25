@@ -170,6 +170,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         initialAccessPolicy: initialAccessPolicyFor('weixin', accountConfig),
       });
       const workspaceScope = createBotWorkspaceScope(harness, {
+        multipleConnect: config.multipleConnectRuntime,
         botId, workspaces, state, agentPresetCatalog,
       });
       return new Runtime({

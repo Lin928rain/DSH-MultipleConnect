@@ -2,7 +2,7 @@ import { modernHarnessApi } from './modern-harness-api.mjs';
 
 /** Connect to this Host directly unless an external Harness URL was configured. */
 export function harnessConnection(ctx, config = {}, { competitiveApprovals = false } = {}) {
-  if (config.harnessBaseUrl !== undefined) {
+  if (config.harnessBaseUrl !== undefined && !config.multipleConnectRuntime) {
     return { baseUrl: new URL(config.harnessBaseUrl) };
   }
   const apiProxy = modernHarnessApi(ctx, { deliveryService: config.deliveryService });

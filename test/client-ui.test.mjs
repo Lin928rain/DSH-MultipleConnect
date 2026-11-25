@@ -191,7 +191,7 @@ test('removing the first account preserves collapse styles and toggling for rema
   }
 });
 
-test('IM settings renders twelve IM channels plus the AI Office connector', async () => {
+test('IM settings renders IM channels, Snowluma and the AI Office connector', async () => {
   const { default: packageMetadata } = await import('../package.json', {
     with: { type: 'json' },
   });
@@ -218,20 +218,11 @@ test('IM settings renders twelve IM channels plus the AI Office connector', asyn
   assert.match(markup, /class="dim-brand"/);
   assert.equal(IM_PLUGIN_VERSION, packageVersion);
   assert.match(markup, new RegExp(
-    `<div class="dim-brandHeading"><strong class="dim-brandName">DSH-IM<\\/strong><span class="dim-brandVersion">v${packageVersion.replaceAll('.', '\\.')}<\\/span><\\/div>`,
+    `<div class="dim-brandHeading"><strong class="dim-brandName">DSH-MultipleConnect<\\/strong><span class="dim-brandVersion">v${packageVersion.replaceAll('.', '\\.')}<\\/span><\\/div>`,
   ));
   assert.doesNotMatch(markup, /dim-versionTooltip|当前版本/);
   assert.doesNotMatch(markup, /dim-brandLogo|<img/);
-  assert.match(markup, /href="https:\/\/github\.com\/xmanrui\/dsh-im"/);
-  assert.match(markup, /target="_blank"/);
-  assert.match(markup, /rel="noopener noreferrer"/);
-  assert.match(markup, /aria-label="dsh-im GitHub"/);
-  assert.match(markup, /dim-updateTrigger[^>]*aria-label="检查更新"[^>]*aria-haspopup="dialog"[^>]*><svg/);
-  assert.match(markup, /class="dim-updateTooltip" role="tooltip">检查更新<\/span>/);
-  assert.ok(markup.indexOf('dim-updateTrigger') < markup.indexOf('dim-githubAction'));
-  assert.ok(markup.indexOf('dim-githubAction') < markup.indexOf('dim-generalSettingsAction'));
-  assert.match(markup, /aria-describedby="[^"]+"/);
-  assert.match(markup, /role="tooltip"[^>]*>帮助与反馈 · 前往 GitHub</);
+  assert.doesNotMatch(markup, /dim-updateTrigger|dim-githubAction/);
   assert.match(markup, /id="dim-general-settings-trigger"/);
   assert.match(markup, /aria-label="通用设置"/);
   assert.doesNotMatch(markup, /aria-current="page"/);
@@ -269,6 +260,7 @@ test('IM settings renders twelve IM channels plus the AI Office connector', asyn
   assert.match(markup, />企业微信</);
   assert.match(markup, />企业微信应用</);
   assert.match(markup, />QQ</);
+  assert.match(markup, />Snowluma</);
   assert.match(markup, />Slack</);
   assert.match(markup, />Telegram</);
   assert.match(markup, />Discord</);
@@ -292,7 +284,7 @@ test('IM settings renders twelve IM channels plus the AI Office connector', asyn
   // This render's `emailRpcCall` never reports the channel as
   // enabled, so the mailbox entry point is omitted: twelve IM channels plus the
   // AI Office connector. The email tab is covered separately below.
-  assert.equal((markup.match(/role="tab"/g) ?? []).length, 13);
+  assert.equal((markup.match(/role="tab"/g) ?? []).length, 14);
   assert.equal((markup.match(/aria-selected="true"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /role="switch"|type="checkbox"/);
   assert.doesNotMatch(markup, /dim-chevron|扫码绑定<\/small>|扫码接入<\/small>/);
@@ -1377,19 +1369,19 @@ test('client registers one top-level bilingual IM settings section with a direct
     assert.deepEqual(Object.keys(dictionaries[0].value.en).sort(), Object.keys(dictionaries[0].value.zh).sort());
     assert.equal(registrations.length, 1);
     assert.equal(registrations[0].options.name, 'settings.section');
-    assert.equal(registrations[0].options.id, 'xmanrui-dsh-im');
+    assert.equal(registrations[0].options.id, 'dsh-multiple-connect');
     assert.equal(registrations[0].options.order, 21);
     assert.equal(registrations[0].options.locale, IM_LOCALE_NAMESPACE);
-    assert.equal(registrations[0].options.label(), 'IM bots');
+    assert.equal(registrations[0].options.label(), 'DSH-MultipleConnect');
     assert.equal(typeof registrations[0].component, 'function');
 
     const injected = registrations[0].options.inject();
     const signal = new AbortController().signal;
-    await injected.updateRpcCall('update.status', {}, signal);
+    await injected.connectRpcCall('status', {}, signal);
     await injected.globalSettingsRpcCall('settings.inbound-ttl.get', {}, signal);
     await injected.imessageRpcCall('connection.status', {}, signal);
     assert.deepEqual(rpcCalls, [
-      ['/api', 'dsh-im/dsh-im', { method: 'update.status', payload: {} }, signal],
+      ['/api', 'dsh-im/dsh-multiple-connect', { method: 'status', payload: {} }, signal],
       ['/api', `dsh-im${GLOBAL_SETTINGS_RPC_CHANNEL}`, { method: 'settings.inbound-ttl.get', payload: {} }, signal],
       ['/api', 'dsh-im/imessage', { method: 'connection.status', payload: {} }, signal],
     ]);
@@ -1427,7 +1419,7 @@ test('client registers one top-level bilingual IM settings section with a direct
     assert.match(markup, new RegExp(
       `class="dim-brandVersion">v${IM_PLUGIN_VERSION.replaceAll('.', '\\.')}<\\/span>`,
     ));
-    assert.match(markup, /Help &amp; feedback · Open GitHub/);
+    assert.doesNotMatch(markup, /Help &amp; feedback/);
     assert.match(markup, /General settings/);
     assert.match(markup, />WeChat<|>Feishu<|>DingTalk<|>WeCom</);
     assert.match(markup, />QQ<[^]*>Slack<[^]*>Telegram<[^]*>Discord<[^]*>WhatsApp</);
@@ -1636,7 +1628,7 @@ test('every channel tab receives its RPC call from the settings render site', as
     [...injectBlock.matchAll(/([a-zA-Z]+RpcCall)\s*,/g)].map(m => m[1]),
   );
   const missing = tabIds
-    .map((id) => `${id}RpcCall`)
+    .map((id) => id === 'snowluma' ? 'connectRpcCall' : `${id}RpcCall`)
     .filter((name) => !providedProps.has(name));
   assert.deepEqual(missing, [], 'every channel tab must receive its RPC call prop');
 });

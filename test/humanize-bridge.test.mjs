@@ -124,7 +124,7 @@ function createBridge({ bot, humanize, harness, state, descriptor = DESCRIPTOR }
   });
 }
 
-test('read delay is silent and precedes both the typing indicator and the ask', async () => withKeepAlive(async () => {
+test('legacy delay settings do not postpone the typing indicator or the ask', async () => withKeepAlive(async () => {
   const bot = recordedBot({ withTyping: true });
   const startedAt = Date.now();
   let askAt = 0;
@@ -144,56 +144,12 @@ test('read delay is silent and precedes both the typing indicator and the ask', 
   });
   await bridge.accept(message('delay-one', '需要延迟的问题'));
   const replyAt = Date.now();
-  assert.ok(askAt - startedAt >= 100, `ask must wait out the read delay (waited ${askAt - startedAt}ms)`);
   assert.ok(replyAt - startedAt < 5_000, 'delay must be bounded');
   // Phase ② order: the typing indicator opens first, then the ask runs.
   const typingIndex = bot.events.indexOf('typing');
   const textIndex = bot.events.indexOf('text:延迟后的回答');
   assert.ok(typingIndex !== -1, 'typing indicator must fire in compose phase');
   assert.ok(textIndex > typingIndex, 'reply text follows the typing indicator');
-}));
-
-test('a follow-up message right after a completed turn gets the activity fast reply', async () => withKeepAlive(async () => {
-  const bot = recordedBot({ withTyping: true });
-  const askWaits = [];
-  const bridge = createBridge({
-    bot,
-    humanize: humanizeSettings(
-      { typingIndicator: 'continuous' },
-      {
-        enabled: true,
-        readDelay: {
-          minMs: 200, maxMs: 300, charsPerSecond: 0, maxTotalMs: 30_000,
-          activityBoost: {
-            enabled: true, fastReplyMs: 150, fastWindowMs: 60_000,
-            minWindowMs: 120_000, fullWindowMs: 300_000,
-          },
-        },
-      },
-    ),
-    harness: {
-      createSession: async () => 'session-activity',
-      sessionExists: async () => true,
-      ask: async () => {
-        askWaits.push(Date.now());
-        return '回答';
-      },
-    },
-  });
-  let turnStartedAt = Date.now();
-  await bridge.accept(message('activity-one', '第一条'));
-  // First message: no completed turn on record (idleMs null) → the full
-  // uniform range applies, not the fast reply.
-  const firstWait = askWaits[0] - turnStartedAt;
-  assert.ok(firstWait >= 200, `first message waits the full range (waited ${firstWait}ms)`);
-
-  turnStartedAt = Date.now();
-  await bridge.accept(message('activity-two', '马上又来一条'));
-  // The previous turn just ended: idle is inside the fast window, so the
-  // base snaps to fastReplyMs instead of uniform(200, 300).
-  const secondWait = askWaits[1] - turnStartedAt;
-  assert.ok(secondWait >= 100, `fast reply still waits (waited ${secondWait}ms)`);
-  assert.ok(secondWait < 200, `follow-up beats the configured floor (waited ${secondWait}ms)`);
 }));
 
 test('sendDelay disabled keeps the legacy immediate flow', async () => withKeepAlive(async () => {
@@ -215,33 +171,6 @@ test('sendDelay disabled keeps the legacy immediate flow', async () => withKeepA
   assert.ok(askAt - startedAt < 80, 'disabled sendDelay must not sleep');
   assert.equal(bot.events.includes('typing'), false, 'typing off = no indicator at all');
   assert.deepEqual(bot.events.filter((e) => e.startsWith('text:')), ['text:立即回答']);
-}));
-
-test('a newer message supersedes a turn still in its read delay', async () => withKeepAlive(async () => {
-  const bot = recordedBot({ withTyping: true });
-  const asks = [];
-  const bridge = createBridge({
-    bot,
-    humanize: humanizeSettings(
-      { typingIndicator: 'off' },
-      { enabled: true, readDelay: { minMs: 400, maxMs: 500 } },
-    ),
-    harness: {
-      createSession: async () => 'session-supersede',
-      ask: async (_sessionId, content) => {
-        asks.push(content);
-        return `回答:${content}`;
-      },
-    },
-  });
-  const first = bridge.accept(message('superseded-one', '先到的问题'));
-  await new Promise((resolve) => setImmediate(resolve));
-  // Second message arrives while the first is still silently reading.
-  const second = bridge.accept(message('superseded-two', '后来的问题'));
-  await Promise.all([first, second]);
-  assert.deepEqual(asks, ['后来的问题'], 'only the newer message reaches the harness');
-  assert.deepEqual(bot.events.filter((e) => e.startsWith('text:')), ['text:回答:后来的问题'],
-    'the superseded turn stays silent — no error reply, no double reply');
 }));
 
 test('a newer message silently supersedes a turn already inside the harness', async () => withKeepAlive(async () => {
@@ -290,33 +219,6 @@ test('a newer message silently supersedes a turn already inside the harness', as
     ['text:回答:后来的问题'],
     'the superseded turn announces nothing — no 已停止。notice',
   );
-}));
-
-test('/stop during the read delay stops the pending message', async () => withKeepAlive(async () => {
-  const bot = recordedBot({ withTyping: true });
-  const asks = [];
-  const bridge = createBridge({
-    bot,
-    humanize: humanizeSettings(
-      { typingIndicator: 'off' },
-      { enabled: true, readDelay: { minMs: 500, maxMs: 600 } },
-    ),
-    harness: {
-      createSession: async () => 'session-stop',
-      ask: async (_sessionId, content) => {
-        asks.push(content);
-        return '不应到达';
-      },
-    },
-  });
-  const pending = bridge.accept(message('stop-one', '会被停止的问题'));
-  await new Promise((resolve) => setImmediate(resolve));
-  await bridge.accept(message('stop-cmd', '/stop'));
-  await pending;
-  assert.deepEqual(asks, [], 'the stopped message never reaches the harness');
-  assert.ok(bot.events.some((e) => e.startsWith('text:已停止待发送的消息')),
-    'the stop command acknowledges the pending message');
-  assert.equal(bot.events.some((e) => e.startsWith('text:不应到达')), false);
 }));
 
 test('streaming early-stops the typing session at the first visible reply', async () => withKeepAlive(async () => {
@@ -427,48 +329,6 @@ test('with busyMessageMode steer, a plain text message steers and never supersed
     'the steering message itself never becomes a separate reply');
 }));
 
-test('a superseded batch submission returns to collecting so /send can retry', async () => withKeepAlive(async () => {
-  const bot = recordedBot({ withTyping: false });
-  const asks = [];
-  const bridge = createBridge({
-    bot,
-    humanize: humanizeSettings(
-      { typingIndicator: 'off' },
-      { enabled: true, readDelay: { minMs: 400, maxMs: 500 } },
-    ),
-    harness: {
-      sessionExists: async () => true,
-      createSession: async () => 'session-batch',
-      ask: async (_sessionId, content) => {
-        asks.push(String(content));
-        return `回答:${content}`;
-      },
-    },
-  });
-  await bridge.accept(message('b-open', '/batch'));
-  await bridge.accept(message('b-1', '第一句批量内容'));
-  await bridge.accept(message('b-2', '第二句批量内容'));
-  const submitted = bridge.accept(message('b-send', '/send'));
-  await new Promise((resolve) => setImmediate(resolve));
-  // A newer message during the batch turn's read delay supersedes it.
-  const newer = bridge.accept(message('b-new', '插队问题'));
-  await Promise.all([submitted, newer]);
-  assert.equal(asks.length, 1, 'only the newer message reaches the harness');
-  assert.match(asks[0], /插队问题/);
-  assert.ok(!bot.events.some((e) => e.includes('批量内容')),
-    'the superseded batch never produces a reply');
-
-  // The batch fell back to collecting — /send retries instead of being
-  // told the batch is still submitting.
-  const retried = bridge.accept(message('b-retry', '/send'));
-  await retried;
-  assert.equal(asks.length, 2, 'the retry re-submits the batch');
-  assert.match(asks[1], /第一句批量内容/);
-  assert.match(asks[1], /第二句批量内容/);
-  assert.ok(bot.events.some((e) => e.includes('第一句批量内容')),
-    'the retried batch turn replies');
-}));
-
 test('artifact delivery restarts the indicator with the upload action', async (t) => withKeepAlive(async () => {
   // Real registered artifacts: the bridge materializes managed snapshots
   // before sending, so the fixture goes through the actual registry.
@@ -537,7 +397,7 @@ test('artifact delivery restarts the indicator with the upload action', async (t
     'released artifacts are not re-delivered');
 }));
 
-test('segment gaps pause between message-break segments and relight the indicator', async () => withKeepAlive(async () => {
+test('message-break sends distinct segments and relights the indicator', async () => withKeepAlive(async () => {
   const bot = recordedBot({ withTyping: true });
   const segmentTimes = new Map();
   const sendTextOriginal = bot.sendText;
@@ -569,8 +429,6 @@ test('segment gaps pause between message-break segments and relight the indicato
   const secondAt = segmentTimes.get('第二段');
   assert.ok(firstAt !== undefined && secondAt !== undefined,
     `both segments must be sent separately (got ${[...segmentTimes.keys()].join(', ')})`);
-  assert.ok(secondAt - firstAt >= 70,
-    `segments must be separated by the segment gap (waited ${secondAt - firstAt}ms)`);
   // The indicator relights after each segment send (restartOn in the
   // sendSegment wrapper).
   const firstSegmentIndex = bot.events.indexOf('text:第一段');
@@ -652,7 +510,7 @@ test('turn errors stop the typing session without leaving the indicator on', asy
     'the failure reply still reaches the user');
 }));
 
-test('channels without a typing API never start a session and still delay reads', async () => withKeepAlive(async () => {
+test('channels without a typing API answer without a typing session', async () => withKeepAlive(async () => {
   const bot = recordedBot({ withTyping: false });
   const startedAt = Date.now();
   let askAt = 0;
@@ -671,7 +529,6 @@ test('channels without a typing API never start a session and still delay reads'
     },
   });
   await bridge.accept(message('no-typing-api', '无声渠道'));
-  assert.ok(askAt - startedAt >= 70, 'the read delay applies without a typing API');
   assert.equal(bot.events.includes('typing'), false, 'no typing events without the API');
 }));
 

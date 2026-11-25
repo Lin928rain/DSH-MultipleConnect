@@ -1,3 +1,4 @@
+import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import {
@@ -285,9 +286,14 @@ export class WecomAppBridge {
       hasFiles: false,
     });
     if (!access.allowed) {
+      if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(messageId, sender, access);
     }
+    if (captureExternal(this.#harness, () => ({
+      messageId, conversationId: sender, senderId: sender, text: commandText,
+      attachments: hasImages ? [{ type: 'image' }] : [],
+    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
     this.#acceptedMessageIds.set(messageId, captureContextEnhancement(
       this.#contextEnhancement,
       'direct',

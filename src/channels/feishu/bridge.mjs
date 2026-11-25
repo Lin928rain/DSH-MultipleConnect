@@ -1,3 +1,4 @@
+import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
 import { randomUUID } from 'node:crypto';
@@ -67,9 +68,6 @@ import {
 } from '../shared/workspace-command.mjs';
 import { askInWorkspaceSession } from '../shared/workspace-session.mjs';
 import {
-  applyReadDelay,
-  applySegmentGap,
-  SHORT_DELAY_CAP_MS,
 } from '../shared/send-delay.mjs';
 import { resolveHumanizeSettings } from '../shared/humanize-resolver.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
@@ -1137,7 +1135,7 @@ export class FeishuHarnessBridge {
     }
     if (event?.message?.chat_type !== 'p2p'
       && this.#groupResponseMode === FEISHU_GROUP_RESPONSE_MODES.MENTION
-      && !addressed) {
+      && !addressed && this.#harness?.multipleConnect?.mode() !== 'external') {
       return Promise.resolve();
     }
     if (this.#state.hasSeen(messageId) || this.#acceptedMessageIds.has(messageId)) {
@@ -1182,9 +1180,14 @@ export class FeishuHarnessBridge {
         }),
     });
     if (!access.allowed) {
+      if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(event, messageId, access);
     }
+    if (captureExternal(this.#harness, () => ({
+      messageId, conversationId: key, senderId: senderOpenId(event), kind: conversationType,
+      text: commandText, attachments: [...(commandMessage.images ?? []), ...(commandMessage.files ?? [])],
+    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
     // Register a managed-topic root only after access is allowed, so a
     // rejected or ignored question never reserves a candidate slot.
     if (this.#mentionTopicReply
@@ -2639,6 +2642,9 @@ export class FeishuHarnessBridge {
     newSessionActionId = null,
     fromMessageQueue = false,
   }) {
+    const connection = this.#harness?.multipleConnect;
+    if (connection && (connection.mode() === 'external'
+      || /^(?:new|use|workspace|archive|compact|clear|fork|unwatch)(?::|$)/u.test(action))) return;
     // Confirmations triggered by a card interaction stay anchored to the
     // card's message so they land inside the same Feishu topic.
     this.#rememberTopicReply(messageId, key);
@@ -5410,13 +5416,6 @@ export class FeishuHarnessBridge {
     return true;
   }
 
-  #idleMsFor(key) {
-    // null = no completed turn on record (first message): the activity
-    // boost then stays out of the way and the full read-delay range applies.
-    const lastTurnEnd = this.#turnEnds.get(key);
-    return lastTurnEnd === undefined ? null : Date.now() - lastTurnEnd;
-  }
-
   async #answerWithStepPush(event, key, message, { onAskComplete, preAskSignal = null } = {}) {
     this.#beginImTurn(key);
     const chatId = event.message.chat_id;
@@ -5805,10 +5804,6 @@ export class FeishuHarnessBridge {
     const messageId = event.message.message_id;
     const text = message.content;
     const humanize = this.#humanizeSettings();
-    // ---- Phase ①: read delay（"过了一段时间才读到消息"）----
-    // Silent: no card, no reply. Abortable: a newer message (interrupt) or
-    // /stop supersedes the phase instead of waiting it out. Feishu has no
-    // typing API, so the wait is capped (SHORT_DELAY_CAP_MS).
     const preAsk = new AbortController();
     this.#preAskControllers.set(key, preAsk);
     const preAskSignal = this.#signal
@@ -5826,13 +5821,6 @@ export class FeishuHarnessBridge {
       onAskComplete?.();
     };
     try {
-      await applyReadDelay({
-        settings: humanize,
-        userText: text,
-        idleMs: this.#idleMsFor(key),
-        channelCapMs: SHORT_DELAY_CAP_MS,
-        signal: preAskSignal,
-      });
       if (preAsk.signal.aborted) {
         const superseded = new Error('superseded by a newer message');
         superseded.code = 'superseded';
@@ -5855,18 +5843,9 @@ export class FeishuHarnessBridge {
       if (!this.#channel?.stream || !this.#streaming) {
         // Create message_break handler for the plain text path. Segment
         // gaps ("typing the next message") pause between segments.
-        let segmentsSent = 0;
         const messageBreakHandler = humanize.messageBreak
           ? createMessageBreakHandler({
             sendSegment: async (segmentText) => {
-              if (segmentsSent > 0) {
-                await applySegmentGap({
-                  settings: humanize,
-                  segmentText,
-                  signal: this.#signal,
-                });
-              }
-              segmentsSent += 1;
               await this.#sendAnswerText(
                 chatId,
                 segmentText,

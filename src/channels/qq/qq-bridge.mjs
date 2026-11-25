@@ -1,3 +1,4 @@
+import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
@@ -81,9 +82,6 @@ import { isQqMessageAddressed, normalizeQqMentions } from './qq-mention.mjs';
 import { createMessageBreakHandler } from '../shared/message-break.mjs';
 import { isSupersededStop } from '../shared/message-mode.mjs';
 import {
-  applyReadDelay,
-  applySegmentGap,
-  SHORT_DELAY_CAP_MS,
 } from '../shared/send-delay.mjs';
 import { createTypingSession } from '../shared/typing-session.mjs';
 import { resolveHumanizeSettings } from '../shared/humanize-resolver.mjs';
@@ -554,7 +552,7 @@ export class QqHarnessBridge {
       && this.#batchInputs.status(key).phase === 'idle';
     const menuInput = numericMenu
       ? `/m pick ${this.#menus.tokenFor(key, sender)} ${commandText}` : commandText;
-    if (addressed) {
+    if (addressed || this.#harness?.multipleConnect?.mode() === 'external') {
       const access = this.#accessPolicy
         ? evaluateInboundAccess(this.#accessPolicy, {
             conversationType: message.kind === 'c2c' ? 'direct' : 'group',
@@ -568,10 +566,15 @@ export class QqHarnessBridge {
           ? { allowed: true, reason: 'legacy-owner' }
           : { allowed: false, reason: 'sender-not-allowed' };
       if (!access.allowed) {
+        if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
         this.#acceptedMessageIds.set(messageId, null);
         return this.#finishAccessDecision(message, messageId, access);
       }
     }
+    if (captureExternal(this.#harness, () => ({
+      messageId, conversationId: key, senderId: sender,
+      kind: message.kind === 'c2c' ? 'direct' : 'group', text: commandText, attachments: message.attachments,
+    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
     this.#acceptedMessageIds.set(messageId, captureContextEnhancement(
       this.#contextEnhancement,
       message.kind === 'c2c' ? 'direct' : 'group',
@@ -1045,13 +1048,6 @@ export class QqHarnessBridge {
     return true;
   }
 
-  #idleMsFor(key) {
-    // null = no completed turn on record (first message): the activity
-    // boost then stays out of the way and the full read-delay range applies.
-    const lastTurnEnd = this.#turnEnds.get(key);
-    return lastTurnEnd === undefined ? null : Date.now() - lastTurnEnd;
-  }
-
   async #process(message, key, {
     alreadyRecorded = false,
     preparedMessage,
@@ -1153,34 +1149,17 @@ export class QqHarnessBridge {
       // unacknowledged messages, so a redelivery arriving during the delay
       // must never enqueue the same message as a second turn.
       await markMessageSeen();
-      // ---- Phase ①: read delay（"过了一段时间才读到消息"）----
-      // Silent: no typing, no partial reply. Abortable: a newer message
-      // (interrupt) or /stop supersedes the phase instead of waiting it out.
       preAsk = new AbortController();
       this.#preAskControllers.set(key, preAsk);
       const preAskSignal = this.#signal
         ? AbortSignal.any([this.#signal, preAsk.signal])
         : preAsk.signal;
       try {
-        await applyReadDelay({
-          settings: humanize,
-          userText: text,
-          idleMs: this.#idleMsFor(key),
-          // C2C has a typing indicator to explain the wait (full delay);
-          // group chats have no indicator at all (SHORT_DELAY_CAP_MS).
-          channelCapMs: message.kind === 'c2c' ? undefined : SHORT_DELAY_CAP_MS,
-          signal: preAskSignal,
-        });
         if (preAsk.signal.aborted) {
           const superseded = new Error('superseded by a newer message');
           superseded.code = 'superseded';
           throw superseded;
         }
-        // ---- Phase ②: compose ----
-        // Self-managed C2C typing session (replaces the SDK middleware whose
-        // 50s keepalive was dead in this integration): starts AFTER the
-        // silence, renews every 50s, and dies with the turn. QQ is
-        // continuous-only in v1 (ticket-style API; burst is v2).
         if (message.kind === 'c2c'
           && humanize.typingIndicator !== 'off'
           && typeof this.#bot.sendTyping === 'function') {
@@ -1237,15 +1216,7 @@ export class QqHarnessBridge {
           ? createMessageBreakHandler({
             sendSegment: async (segmentText) => {
               if (segmentsSent > 0) {
-                // restartOn → sleep → send (plan §6.3): the indicator covers
-                // the gap and the upcoming send; a trailing restartOn after
-                // the final segment would relight it with nothing following.
                 await typingSession?.restartOn();
-                await applySegmentGap({
-                  settings: humanize,
-                  segmentText,
-                  signal: this.#signal,
-                });
               }
               segmentsSent += 1;
               await sendMarkdownReply(this.#bot, target, segmentText, { logger: this.#logger });

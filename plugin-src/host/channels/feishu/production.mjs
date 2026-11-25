@@ -240,6 +240,7 @@ export async function createProductionController(ctx, config = {}, internals = {
         initialAccessPolicy: newBotAccessPolicyFor('feishu', botConfig),
       });
       const workspaceScope = createBotWorkspaceScope(harness, {
+        multipleConnect: config.multipleConnectRuntime,
         botId: id, workspaces, state, agentPresetCatalog,
       });
       // 语音是可选渠道能力:凭据读取失败时静默禁用,不阻断机器人连接。

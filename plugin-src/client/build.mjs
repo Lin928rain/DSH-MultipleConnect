@@ -15,6 +15,7 @@ const result = await build({
   format: 'cjs',
   platform: 'browser',
   target: ['chrome100'],
+  jsx: 'automatic',
   external: ['react', 'react-dom'],
   write: false,
   minify: process.env.NODE_ENV === 'production',
