@@ -8,15 +8,11 @@ import { createMessageBreakHandler } from '../../src/channels/shared/message-bre
 import { splitMessageText } from '../../src/channels/shared/editable-message-stream.mjs';
 import { harnessConnection } from './harness-connection.mjs';
 import { normalizeDeliveryTarget } from './delivery-adapter.mjs';
+import { inboxPrompt } from '../../src/channels/shared/multiple-connect.mjs';
+import { createOneBotInboxProvider, oneBotContent, oneBotSegments, oneBotWireId as wireId } from './onebot-inbox.mjs';
 
 function failure(code, message = code) {
   return Object.assign(new Error(message), { code });
-}
-
-function wireId(value) {
-  if (typeof value === 'number' && !Number.isSafeInteger(value)) return '';
-  const id = String(value ?? '');
-  return /^-?\d{1,16}$/.test(id) && Number.isSafeInteger(Number(id)) ? id : '';
 }
 
 function allowList(value) {
@@ -27,32 +23,26 @@ function allowList(value) {
 }
 
 export function normalizeSnowlumaMessage(event, { users, groups, accountId }) {
-  if (event?.post_type !== 'message' || !['private', 'group'].includes(event.message_type)) return null;
-  const group = event.message_type === 'group';
+  const deleted = event?.post_type === 'notice' && ['group_recall', 'friend_recall'].includes(event.notice_type);
+  const upload = event?.post_type === 'notice' && event.notice_type === 'group_upload' && typeof event.file?.id === 'string';
+  if (!deleted && !upload && (event?.post_type !== 'message' || !['private', 'group'].includes(event.message_type))) return null;
+  const group = event.message_type === 'group' || event.notice_type === 'group_recall' || upload;
   const senderId = wireId(event.user_id);
   const selfId = wireId(event.self_id);
   if (!senderId || !selfId || selfId === senderId || accountId && accountId !== selfId) return null;
   const chatId = group ? wireId(event.group_id) : senderId;
   if (!chatId || !(group ? groups : users).includes(chatId)) return null;
   if (!group && event.sub_type === 'group') return null;
-  const messageId = wireId(event.message_id);
+  const messageId = upload ? 'upload:' + event.file.id : wireId(event.message_id);
   if (!messageId) return null;
-  const segments = Array.isArray(event.message) ? event.message.filter((item) => item && typeof item === 'object')
-    : [{ type: 'text', data: { text: event.raw_message ?? event.message } }];
+  const segments = upload ? [{ type: 'file', data: event.file }] : oneBotSegments(event.message ?? event.raw_message);
   const addressed = !group || segments.some(({ type, data }) => type === 'at' && wireId(data?.qq) === selfId);
-  const text = segments.map(({ type, data }) => {
-    if (type === 'text') return typeof data?.text === 'string' ? data.text : '';
-    if (type === 'at') return wireId(data?.qq) === selfId ? '' : `@${wireId(data?.qq) || 'all'}`;
-    if (type === 'reply') return wireId(data?.id) ? `[Reply to QQ message ${wireId(data.id)}]` : '';
-    return `[${typeof type === 'string' ? type : 'attachment'}]`;
-  }).join('').trim();
-  if (!text) return null;
+  const content = oneBotContent(segments, { route: { kind: group ? 'group' : 'private', chatId, selfId }, messageId, selfId });
+  if (!content.text && !deleted && !addressed) return null;
   return {
     messageId, senderId, chatId, selfId, kind: group ? 'group' : 'direct',
     conversationId: `${selfId}:${group ? 'group' : 'private'}:${chatId}`,
-    text, addressed,
-    attachments: segments.filter(({ type }) => !['text', 'at', 'reply'].includes(type))
-      .map(({ type, data }) => ({ type, ...(typeof data?.file === 'string' ? { name: data.file } : {}) })),
+    ...content, addressed, ...(deleted ? { deleted: true } : {}), ...(upload ? { passive: true } : {}),
     receivedAt: Number.isSafeInteger(event.time) ? event.time * 1000 : undefined,
   };
 }
@@ -63,11 +53,12 @@ export class SnowlumaSocket {
   #pending = new Map();
   #closed = false;
 
-  constructor(config, onMessage, { Socket = WebSocket, onError = () => {} } = {}) {
+  constructor(config, onMessage, { Socket = WebSocket, onError = () => {}, onOpen } = {}) {
     this.config = config;
     this.onMessage = onMessage;
     this.Socket = Socket;
     this.onError = onError;
+    this.onOpen = onOpen;
     this.connect();
   }
 
@@ -84,6 +75,9 @@ export class SnowlumaSocket {
       return;
     }
     this.#socket = socket;
+    if (this.onOpen) socket.addEventListener('open', () => {
+      if (!this.#closed && socket === this.#socket) void Promise.resolve().then(this.onOpen).catch(() => undefined);
+    }, { once: true });
     socket.addEventListener('message', ({ data }) => {
       if (this.#closed || socket !== this.#socket || typeof data !== 'string') return;
       let event;
@@ -199,15 +193,17 @@ export function createSnowlumaManager({ ctx, config, runtime, deliveryService, l
     entries.get(account.botId)?.socket.close();
     const bridge = runtime.connection(account.botId, { ask: (...args) => getHarness().ask(...args) });
     const controller = new AbortController();
+    const rememberAccount = (accountId) => {
+      if (!accountId || account.accountId || controller.signal.aborted) return;
+      account.accountId = accountId;
+      store.setState('snowluma.connections', stored().map((item) => item.botId === account.botId ? account : item));
+    };
     const socket = new SnowlumaSocket(account, async (event) => {
       if (controller.signal.aborted) return;
       const message = normalizeSnowlumaMessage(event, account);
       if (!message) return;
-      if (!account.accountId) {
-        account.accountId = message.selfId;
-        store.setState('snowluma.connections', stored().map((item) => item.botId === account.botId ? account : item));
-      }
-      if (bridge.receive(message) !== 'internal' || !message.addressed) return;
+      rememberAccount(message.selfId);
+      if (bridge.receive(message) !== 'internal' || !message.addressed || !message.text) return;
       const key = `${account.botId}:${message.conversationId}:${message.messageId}`;
       if (seen.has(key)) return;
       seen.set(key, true);
@@ -227,7 +223,7 @@ export function createSnowlumaManager({ ctx, config, runtime, deliveryService, l
       });
       const task = askInWorkspaceSession({
         harness: { multipleConnect: bridge },
-        text: `[Snowluma · ${kind} ${message.chatId} · sender ${message.senderId}]\n${message.text}`,
+        text: `[Snowluma · ${kind} ${message.chatId} · sender ${message.senderId}]\n${message.text}\n${inboxPrompt(message, account.botId)}`,
         askOptions: {
           signal,
           progressMode: 'all',
@@ -254,7 +250,15 @@ export function createSnowlumaManager({ ctx, config, runtime, deliveryService, l
       });
       sending.add(task);
       try { await task; } finally { sending.delete(task); }
-    }, { Socket, onError: (error) => logger.warn?.('[dsh-multiple-connect] Snowluma inbound:', error?.code ?? error?.message) });
+    }, { Socket, onError: (error) => logger.warn?.('[dsh-multiple-connect] Snowluma inbound:', error?.code ?? error?.message),
+      async onOpen() {
+        if (account.accountId) return;
+        const identity = await socket.request('get_login_info', {}, controller.signal);
+        rememberAccount(wireId(identity?.user_id));
+      },
+    });
+    const unbind = bridge.bindInboxProvider?.(createOneBotInboxProvider(account, socket, controller.signal));
+    if (unbind) controller.signal.addEventListener('abort', unbind, { once: true });
     entries.set(account.botId, { account, socket, controller });
   }
 

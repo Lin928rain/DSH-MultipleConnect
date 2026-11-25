@@ -419,6 +419,11 @@ export class FeishuRuntime {
         },
         'im.message.reaction.created_v1': () => undefined,
         'im.message.reaction.deleted_v1': () => undefined,
+        ...(this.#harness?.multipleConnect ? { 'im.message.recalled_v1': (event) => {
+          if (isCurrentStart() && typeof event?.message_id === 'string' && typeof event?.chat_id === 'string') {
+            this.#harness.multipleConnect.recall?.({ messageId: event.message_id, chatId: event.chat_id });
+          }
+        } } : {}),
         // Interactive-card button callbacks (only delivered when the app
         // subscribes card.action.trigger; the number-reply fallback covers
         // apps that do not).

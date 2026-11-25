@@ -65,6 +65,55 @@ function ConnectionSettings({ bot, save }) {
     button(label('保存', 'Save'), () => void persist(), busy || !Number.isSafeInteger(Number(draft.threshold)) || Number(draft.threshold) < 1));
 }
 
+function formatStorageBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '–';
+  return bytes < 1024 ** 3 ? (bytes / 1024 ** 2).toFixed(1) + ' MiB' : (bytes / 1024 ** 3).toFixed(2) + ' GiB';
+}
+
+function StorageSettings({ storage, save }) {
+  const { messageDirectory, attachmentDirectory, cacheMiB, downloadMiB, cacheDays, historyDays } = storage;
+  const [draft, setDraft] = React.useState({ messageDirectory, attachmentDirectory, cacheMiB, downloadMiB, cacheDays, historyDays });
+  const [busy, setBusy] = React.useState(false);
+  React.useEffect(() => setDraft({ messageDirectory, attachmentDirectory, cacheMiB, downloadMiB, cacheDays, historyDays }),
+    [messageDirectory, attachmentDirectory, cacheMiB, downloadMiB, cacheDays, historyDays]);
+  const [removePrevious, setRemovePrevious] = React.useState(false);
+  const moving = draft.messageDirectory !== messageDirectory || draft.attachmentDirectory !== attachmentDirectory;
+  const fields = [
+    ['messageDirectory', label('消息库目录（Host 路径）', 'Message database directory (host path)')],
+    ['attachmentDirectory', label('附件缓存目录（Host 路径）', 'Attachment cache directory (host path)')],
+    ['cacheMiB', label('附件缓存上限（MiB）', 'Attachment cache limit (MiB)'), 1],
+    ['downloadMiB', label('单附件下载上限（MiB）', 'Per-attachment download limit (MiB)'), 1],
+    ['cacheDays', label('附件缓存保留天数', 'Attachment cache retention (days)'), 1],
+    ['historyDays', label('消息保留天数（0 为永久）', 'Message retention (days, 0 keeps all)'), 0],
+  ];
+  const persist = async () => {
+    setBusy(true);
+    try {
+      const settings = Object.fromEntries(fields.map(([key, , minimum]) => [
+        key, minimum === undefined ? draft[key] : Number(draft[key]),
+      ]));
+      if (await save('storage.set', { ...settings, removePrevious: moving && removePrevious })) setRemovePrevious(false);
+    } finally { setBusy(false); }
+  };
+  return h('fieldset', { className: 'dim-humanizeField' },
+    h('legend', null, label('消息与附件存储', 'Message and attachment storage')),
+    h('small', null, label('消息库', 'Message database'), ' ', formatStorageBytes(storage.databaseBytes),
+      ' · ', label('附件缓存', 'Attachment cache'), ' ', formatStorageBytes(storage.cacheBytes)),
+    storage.warning && h('p', { role: 'alert' }, storage.warning),
+    fields.map(([key, title, minimum]) => h(React.Fragment, { key },
+      field(title, h('input', {
+        type: minimum === undefined ? 'text' : 'number', min: minimum, step: minimum === undefined ? undefined : 1,
+        value: draft[key], onChange: (event) => setDraft({ ...draft, [key]: event.target.value }),
+      })))),
+    moving && field(label('迁移成功后删除旧副本', 'Delete the previous copy after a successful move'),
+      h('input', { type: 'checkbox', checked: removePrevious, onChange: (event) => setRemovePrevious(event.target.checked) })),
+    button(label('保存存储设置', 'Save storage settings'), () => void persist(), busy),
+    storage.requests?.map(({ id, name, size, approved }) => h('div', { key: id },
+      h('span', null, name || label('附件', 'Attachment'), ' · ', formatStorageBytes(size), ' '),
+      button(approved ? label('已允许本次下载', 'Download approved') : label('允许本次下载', 'Approve this download'),
+        () => void save('storage.approve', { id }), approved))));
+}
+
 export function MultipleConnectSettings({ rpc, openSession }) {
   const { status, error, save } = useConnections(rpc);
   const [workspace, setWorkspace] = React.useState('');
@@ -88,6 +137,7 @@ export function MultipleConnectSettings({ rpc, openSession }) {
             status.workspaces.map((item) => h('option', { key: item.workspaceId, value: item.workspaceId }, item.title)))),
         button(label('创建主对话', 'Create main conversation'), () => void save('workspace.set', { workspaceId: workspace }), !workspace)),
     error && h('p', { role: 'alert' }, error),
+    status?.storage && h(StorageSettings, { storage: status.storage, save }),
     status?.bots.map((bot) => h(ConnectionSettings, {
       key: bot.botId, bot: { ...bot, name: status.snowluma.find((item) => item.botId === bot.botId)?.name }, save,
     })));

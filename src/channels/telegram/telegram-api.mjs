@@ -228,11 +228,11 @@ export class TelegramApi {
     return this.#call('getWebhookInfo', {}, options);
   }
 
-  async getUpdates({ offset, timeout = 25, signal } = {}) {
+  async getUpdates({ offset, timeout = 25, signal, richInbox = false } = {}) {
     const payload = {
       timeout,
       limit: 100,
-      allowed_updates: ['message', 'callback_query'],
+      allowed_updates: ['message', 'callback_query', ...(richInbox ? ['edited_message', 'channel_post', 'edited_channel_post'] : [])],
       ...(Number.isSafeInteger(offset) ? { offset } : {}),
     };
     return this.#call('getUpdates', payload, {
@@ -260,17 +260,21 @@ export class TelegramApi {
     });
   }
 
-  async downloadFileStream({ fileId, signal } = {}) {
-    const url = await this.#downloadUrl(fileId, signal);
+  async downloadFileStream({ fileId, signal, maxBytes } = {}) {
+    const url = await this.#downloadUrl(fileId, signal, maxBytes);
     return fetchFileStream(url, {
       fetchImpl: this.#fetch,
       signal,
       allowedHosts: TELEGRAM_FILE_HOSTS,
+      maxBytes,
     });
   }
 
-  async #downloadUrl(fileId, signal) {
+  async #downloadUrl(fileId, signal, maxBytes) {
     const file = await this.getFile({ fileId, signal });
+    if (maxBytes !== undefined && file?.file_size > maxBytes) {
+      throw Object.assign(new Error('Attachment exceeds the download budget.'), { code: 'attachment-limit' });
+    }
     const filePath = cleanString(file?.file_path);
     if (!filePath || filePath.startsWith('/') || filePath.includes('\\')
       || filePath.includes('?') || filePath.includes('#')) {

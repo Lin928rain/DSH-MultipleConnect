@@ -1,5 +1,5 @@
 import { setTimeout as wait } from 'node:timers/promises';
-import { captureExternal, isMultipleConnectSessionCommand } from './multiple-connect.mjs';
+import { captureExternal, isMultipleConnectSessionCommand, managedInboxInput } from './multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from './busy-message-dispatcher.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -279,7 +279,7 @@ export class TextHarnessBridge {
     // Preserve the channel trigger boundary. Access policy never turns an
     // unaddressed group message into a denial reply.
     if (kind === 'group' && normalized.addressed !== true
-      && this.#harness?.multipleConnect?.mode() !== 'external') {
+      && !this.#harness?.multipleConnect) {
       this.#status.messagesRejected += 1;
       this.#status.lastRejectedAt = new Date().toISOString();
       this.#acceptedMessageIds.set(messageId, null);
@@ -300,7 +300,7 @@ export class TextHarnessBridge {
         hasFiles,
       });
       if (!decision.allowed) {
-        if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
+        if (this.#harness?.multipleConnect?.mode() === 'external' || kind === 'group' && !normalized.addressed) return Promise.resolve();
         this.#status.messagesRejected += 1;
         this.#status.lastRejectedAt = new Date().toISOString();
         // Mark policy denials so a webhook replay cannot repeat local work or
@@ -316,10 +316,16 @@ export class TextHarnessBridge {
         );
       }
     }
-    if (captureExternal(this.#harness, () => ({
+    const inboxRecord = {
       messageId, conversationId, senderId, kind, text: normalized.text ?? normalized.content,
-      attachments: [...(normalized.images ?? []), ...(normalized.files ?? [])],
-    })) || isMultipleConnectSessionCommand(this.#harness, controlTextOf(normalized))) return Promise.resolve();
+      replyTo: normalized.replyTo,
+      attachments: [...(normalized.images ?? []).map((item) => ({ ...item, type: 'image' })), ...(normalized.files ?? [])],
+      ...normalized.inbox,
+    };
+    if (captureExternal(this.#harness, inboxRecord)
+      || isMultipleConnectSessionCommand(this.#harness, controlTextOf(normalized))) return Promise.resolve();
+    if (this.#harness?.multipleConnect && kind === 'group' && !normalized.addressed) return Promise.resolve();
+    if (this.#harness?.multipleConnect && this.#descriptor.key === 'telegram') normalized.inboxRecord = inboxRecord;
     this.#acceptedMessageIds.set(messageId, contextSnapshot === undefined
       ? captureContextEnhancement(this.#contextEnhancement, message?.kind)
       : contextSnapshot);
@@ -854,7 +860,8 @@ export class TextHarnessBridge {
       const hasImages = hasInboundImages(message);
       const hasFiles = hasInboundFiles(message);
       const hasReply = hasReplyReference(message);
-      if (!text && !hasImages && !hasFiles && !hasReply) {
+      if (!text && !hasImages && !hasFiles && !hasReply
+        && !message.inboxRecord?.attachments.length && !message.inboxRecord?.parts?.length) {
         await this.#bot.sendText(target, t('目前支持文字、图片和文件消息。'));
         return;
       }
@@ -900,6 +907,8 @@ export class TextHarnessBridge {
         await this.#bot.sendText(target, compactCommand.message);
         return;
       }
+
+      message = managedInboxInput(this.#harness, message, message.inboxRecord);
 
       // Resolve humanization settings for THIS turn (live provider read
       // with constructor fallback) — global/per-bot panel updates apply
@@ -1056,7 +1065,7 @@ export class TextHarnessBridge {
         // `deferImages` keeps the image bytes out of the prompt text: they ride
         // in `askOptions.images` instead, so a channel that streams can open its
         // carrier before the download finishes.
-        content = hasImages || hasReply
+        content = hasInboundImages(message) || hasReplyReference(message)
           ? await promptContentForInboundMessage(message, { signal: preAskSignal, deferImages: true })
           : cleanText(message.content) || undefined;
       } finally {

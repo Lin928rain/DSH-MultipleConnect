@@ -385,7 +385,7 @@ async function feishuImageDownloadError(error, signal, code = undefined) {
   );
 }
 
-async function feishuResourceStream(event, client, key, type, { signal, maxBytes } = {}) {
+export async function feishuResourceStream(event, client, key, type, { signal, maxBytes } = {}) {
   signal?.throwIfAborted();
   const path = { message_id: event.message.message_id, file_key: key };
   let resource;
@@ -435,6 +435,7 @@ async function feishuResourceStream(event, client, key, type, { signal, maxBytes
 
 function feishuImageSource(event, client, key) {
   return {
+    source: { key, messageId: event.message.message_id, type: 'image' },
     async load({ signal, maxBytes }) {
       const stream = await feishuResourceStream(event, client, key, 'image', { signal, maxBytes });
       return readBoundedStream(stream, { signal, maxBytes });
@@ -447,6 +448,7 @@ function feishuFileSource(event, client, file) {
   if (!key) return null;
   return {
     name: nonEmptyString(file?.file_name) ?? 'file',
+    source: { key, messageId: event.message.message_id, type: 'file' },
     async load({ signal } = {}) {
       const stream = await feishuResourceStream(event, client, key, 'file', { signal });
       return { stream };
@@ -581,6 +583,40 @@ export function extractInboundMessage(event, client) {
     images: imageKeys.map((key) => feishuImageSource(event, client, key)),
     files: file ? [file] : [],
     ...(replyTo ? { replyTo } : {}),
+  };
+}
+
+export function feishuInboxContent(event, client, { forwarded = false } = {}) {
+  const message = event.message;
+  const input = extractInboundMessage(event, client);
+  const parsed = parsedMessageContent(event);
+  const type = message.message_type;
+  const attachments = [
+    ...input.images.map((item) => ({ ...item, type: 'image' })),
+    ...input.files.map((item) => ({ ...item, type: 'file' })),
+  ];
+  const extraType = { audio: 'audio', media: 'video', sticker: 'sticker', folder: 'file' }[type];
+  if (extraType) {
+    const key = nonEmptyString(parsed?.file_key);
+    attachments.push({ type: extraType, name: nonEmptyString(parsed?.file_name) ?? undefined,
+      ...(key && type !== 'folder' ? { source: { key, messageId: message.message_id, type: 'file' } } : {}) });
+    if (type === 'media' && nonEmptyString(parsed?.image_key)) {
+      attachments.push({ type: 'image', preview: true,
+        source: { key: parsed.image_key, messageId: message.message_id, type: 'image' } });
+    }
+  }
+  const parts = [];
+  if (type === 'location') parts.push({ type, name: parsed?.name, longitude: parsed?.longitude, latitude: parsed?.latitude });
+  if (type === 'share_chat' || type === 'share_user') parts.push({ type, id: parsed?.chat_id ?? parsed?.user_id });
+  return {
+    text: input.content, replyTo: input.replyTo, parts, threadId: message.thread_id,
+    attachments: forwarded ? attachments.map(({ source, ...item }) => ({
+      ...item, unavailableReason: 'forwarded-resource-not-supported',
+    })) : attachments,
+    chatId: message.chat_id,
+    chatType: message.chat_type,
+    forwards: type === 'merge_forward' ? [{ id: message.message_id }] : [],
+    receivedAt: Number.isSafeInteger(Number(message.create_time)) ? Number(message.create_time) : undefined,
   };
 }
 

@@ -7,6 +7,7 @@ import {
 } from 'node:crypto';
 
 import { fetchImageBuffer } from '../shared/image-prompt.mjs';
+import { fetchFileStream } from '../shared/file-download.mjs';
 
 export const WEIXIN_QR_BASE_URL = 'https://ilinkai.weixin.qq.com/';
 export const WEIXIN_PROTOCOL_VERSION = '2.4.6';
@@ -244,6 +245,67 @@ export function extractWeixinFiles(message, { fetchImpl = fetch } = {}) {
     });
   }
   return files;
+}
+
+function weixinInboxAssets(item) {
+  const formats = [['image_item', 'image'], ['voice_item', 'audio'], ['file_item', 'file'], ['video_item', 'video']];
+  for (const [key, type] of formats) {
+    const media = item?.[key];
+    if (!media) continue;
+    const size = Number(media.len ?? media.mid_size ?? media.video_size ?? media.size);
+    const assets = [{
+      type, name: nonEmptyString(media.file_name) ?? (type === 'video' ? 'video.mp4' : undefined),
+      size: Number.isSafeInteger(size) && size > 0 ? size : undefined,
+      source: media.media && (type === 'image' || media.media.aes_key)
+        ? { media: media.media, aeskey: media.aeskey, plaintextAllowed: type === 'image' } : undefined,
+    }];
+    if (media.thumb_media && (type === 'image' || type === 'video')) {
+      assets.push({ type: 'image', name: 'preview.jpg', preview: true,
+        source: { media: media.thumb_media, aeskey: media.aeskey, plaintextAllowed: true } });
+    }
+    return assets;
+  }
+  return [];
+}
+
+export function weixinInboxContent(message) {
+  const items = Array.isArray(message.item_list) ? message.item_list : [];
+  const parts = items.flatMap((item) => {
+    const text = nonEmptyString(item?.text_item?.text);
+    const transcript = nonEmptyString(item?.voice_item?.text);
+    return [...(text ? [{ type: 'text', text }] : []), ...(transcript ? [{ type: 'transcript', text: transcript }] : [])];
+  });
+  const replyTo = extractWeixinReplyReference(message);
+  const quoteAssets = items.flatMap((item) => weixinInboxAssets(item?.ref_msg?.message_item));
+  return {
+    text: parts.map(({ text }) => text).join('\n'), parts,
+    attachments: items.flatMap(weixinInboxAssets),
+    ...(replyTo ? { replyTo: { ...replyTo, ...(quoteAssets.length ? { attachments: quoteAssets } : {}) } } : {}),
+  };
+}
+
+export async function openWeixinInboxMedia(source, { fetchImpl = fetch, signal, maxBytes }) {
+  const url = weixinImageDownloadUrl(source.media);
+  if (source.plaintextAllowed && !source.aeskey && !source.media.aes_key) {
+    return fetchFileStream(url, { fetchImpl, signal, maxBytes, allowedHosts: [WEIXIN_CDN_HOST] });
+  }
+  const key = parseWeixinImageAesKey(source);
+  const { stream } = await fetchFileStream(url, {
+    fetchImpl, signal, maxBytes: maxBytes + 16, allowedHosts: [WEIXIN_CDN_HOST],
+  });
+  const decipher = createDecipheriv('aes-128-ecb', key, null);
+  return { stream: (async function* decrypt() {
+    let ciphertextBytes = 0;
+    for await (const chunk of stream) {
+      signal?.throwIfAborted();
+      ciphertextBytes += chunk.length;
+      if (ciphertextBytes > maxBytes + 16) {
+        throw Object.assign(new Error('Attachment exceeds the download budget.'), { code: 'attachment-limit' });
+      }
+      yield decipher.update(chunk);
+    }
+    yield decipher.final();
+  })() };
 }
 
 function isWeixinHost(hostname) {
@@ -632,6 +694,10 @@ export function createWeixinApi({ fetchImpl = fetch, uploadFetchImpl = fetchImpl
 
     inboundFiles(message) {
       return extractWeixinFiles(message, { fetchImpl });
+    },
+
+    openInboxMedia(source, limits) {
+      return openWeixinInboxMedia(source, { ...limits, fetchImpl });
     },
 
     async beginLogin({ localTokens = [], botType = DEFAULT_BOT_TYPE, signal } = {}) {

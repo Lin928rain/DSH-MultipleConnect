@@ -1,4 +1,5 @@
-import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
+import { captureExternal, isMultipleConnectSessionCommand, managedInboxInput } from '../shared/multiple-connect.mjs';
+import { fetchFileStream } from '../shared/file-download.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
@@ -190,26 +191,54 @@ function qqAttachmentKind(attachment) {
   return 'file';
 }
 
-function qqReplyReference(message) {
+function qqReplyReference(message, { rich = false } = {}) {
   const refMsgIdx = nonEmptyString(message?.refMsgIdx);
   if (!refMsgIdx) return null;
-  const element = Array.isArray(message?.msgElements) ? message.msgElements[0] : null;
-  const sourceAttachments = Array.isArray(element?.attachments) ? element.attachments : [];
+  const all = Array.isArray(message?.msgElements) ? message.msgElements : [];
+  const elements = rich ? all : all.slice(0, 1);
+  const sourceAttachments = elements.flatMap((element) => Array.isArray(element?.attachments) ? element.attachments : []);
   const attachments = sourceAttachments.map((attachment) => {
+    if (rich) return qqInboxAsset(attachment);
     const name = nonEmptyString(attachment?.filename);
     return { kind: qqAttachmentKind(attachment), ...(name ? { name } : {}) };
   });
-  const asrText = sourceAttachments
-    .filter((attachment) => qqAttachmentKind(attachment) === 'audio')
-    .map((attachment) => nonEmptyString(attachment?.asr_refer_text))
-    .filter(Boolean)
-    .join('\n');
-  const content = asrText || nonEmptyString(element?.content);
+  const content = elements.map((element) => {
+    const asrText = (Array.isArray(element?.attachments) ? element.attachments : [])
+      .filter((attachment) => qqAttachmentKind(attachment) === 'audio')
+      .map((attachment) => nonEmptyString(attachment?.asr_refer_text)).filter(Boolean).join('\n');
+    return asrText || nonEmptyString(element?.content);
+  }).filter(Boolean).join('\n');
   return {
     messageId: refMsgIdx,
     ...(content ? { content } : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(!content && attachments.length === 0 ? { unavailableReason: 'not-delivered' } : {}),
+  };
+}
+
+function qqInboxAsset(attachment) {
+  const url = nonEmptyString(attachment?.url);
+  const size = Number(attachment?.size);
+  return {
+    type: isQqImageAttachment(attachment) ? 'image' : qqAttachmentKind(attachment),
+    name: nonEmptyString(attachment?.filename) ?? undefined, mediaType: attachmentMediaType(attachment) ?? undefined,
+    size: Number.isSafeInteger(size) && size >= 0 ? size : undefined,
+    source: url ? { url: url.startsWith('//') ? `https:${url}` : url } : undefined,
+  };
+}
+
+export function qqInboxRecord(message, key) {
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  const parts = attachments.flatMap((item) => {
+    const text = nonEmptyString(item?.asr_text ?? item?.asr_refer_text);
+    return text ? [{ type: 'transcript', text }] : [];
+  });
+  const timestamp = Date.parse(message.timestamp);
+  return {
+    messageId: message.messageId, conversationId: key, senderId: message.senderId,
+    kind: message.kind === 'c2c' ? 'direct' : 'group', text: [safeText(message), ...parts.map(({ text }) => text)].filter(Boolean).join('\n'),
+    attachments: attachments.map(qqInboxAsset), replyTo: qqReplyReference(message, { rich: true }), parts,
+    receivedAt: Number.isSafeInteger(timestamp) ? timestamp : undefined,
   };
 }
 
@@ -518,6 +547,10 @@ export class QqHarnessBridge {
     this.#messageBreak = messageBreak === true;
     this.#humanize = humanize ?? null;
     this.#signal = signal;
+    const unbindInbox = harness.multipleConnect?.bindInboxProvider?.({
+      open: ({ url }, limits) => fetchFileStream(url, { ...limits, fetchImpl, allowedHosts: QQ_IMAGE_HOSTS }),
+    });
+    if (unbindInbox) signal?.addEventListener('abort', unbindInbox, { once: true });
     this.#deferred = createDeferredDeliveryCoordinator({ harness, state, signal, logger,
       finalAnswerOnly: true,
       deliver: (entry, outcome) => this.#deliverDeferredOutcome(entry, outcome),
@@ -552,7 +585,7 @@ export class QqHarnessBridge {
       && this.#batchInputs.status(key).phase === 'idle';
     const menuInput = numericMenu
       ? `/m pick ${this.#menus.tokenFor(key, sender)} ${commandText}` : commandText;
-    if (addressed || this.#harness?.multipleConnect?.mode() === 'external') {
+    if (addressed || this.#harness?.multipleConnect) {
       const access = this.#accessPolicy
         ? evaluateInboundAccess(this.#accessPolicy, {
             conversationType: message.kind === 'c2c' ? 'direct' : 'group',
@@ -566,15 +599,14 @@ export class QqHarnessBridge {
           ? { allowed: true, reason: 'legacy-owner' }
           : { allowed: false, reason: 'sender-not-allowed' };
       if (!access.allowed) {
-        if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
+        if (!addressed || this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
         this.#acceptedMessageIds.set(messageId, null);
         return this.#finishAccessDecision(message, messageId, access);
       }
     }
-    if (captureExternal(this.#harness, () => ({
-      messageId, conversationId: key, senderId: sender,
-      kind: message.kind === 'c2c' ? 'direct' : 'group', text: commandText, attachments: message.attachments,
-    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
+    if (captureExternal(this.#harness, () => qqInboxRecord(message, key))
+      || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
+    if (this.#harness?.multipleConnect && !addressed) return Promise.resolve();
     this.#acceptedMessageIds.set(messageId, captureContextEnhancement(
       this.#contextEnhancement,
       message.kind === 'c2c' ? 'direct' : 'group',
@@ -755,7 +787,7 @@ export class QqHarnessBridge {
     batchSubmission = null,
   } = {}) {
     const addressed = isQqMessageAddressed(message);
-    const preparedMessage = addressed
+    const preparedMessage = addressed && !this.#harness?.multipleConnect
       ? prefetchInboundFiles(
           qqInboundMessage(message, { fetchImpl: this.#fetchImpl }),
           { signal: this.#signal },
@@ -1072,7 +1104,7 @@ export class QqHarnessBridge {
     if (!isQqMessageAddressed(message)) return;
 
     const target = message.replyTarget;
-    const promptMessage = preparedMessage
+    let promptMessage = preparedMessage
       ?? qqInboundMessage(message, { fetchImpl: this.#fetchImpl });
     const text = promptMessage.content;
     const hasImages = hasInboundImages(promptMessage);
@@ -1144,6 +1176,10 @@ export class QqHarnessBridge {
         return;
       }
 
+      if (this.#harness?.multipleConnect && !batchSubmission) {
+        const record = qqInboxRecord(message, key);
+        promptMessage = managedInboxInput(this.#harness, { ...promptMessage, content: record.text }, record);
+      }
       const humanize = this.#humanizeSettings();
       // Persist consumption BEFORE the silent read delay: QQ redelivers
       // unacknowledged messages, so a redelivery arriving during the delay
@@ -1182,7 +1218,7 @@ export class QqHarnessBridge {
         // before the download finishes.
         staging = hasImages || hasReply
           ? await promptContentForInboundMessage(promptMessage, { signal: preAskSignal, deferImages: true })
-          : undefined;
+          : this.#harness?.multipleConnect ? promptMessage.content : undefined;
       } finally {
         if (this.#preAskControllers.get(key) === preAsk) {
           this.#preAskControllers.delete(key);

@@ -38,7 +38,7 @@ export function installImSendTool(ctx, { send } = {}) {
   ctx.systemPrompt?.section?.({
     name: 'dsh-multiple-connect:send-im',
     order: 117,
-    text: 'Write an ordinary reply for an inbound message on an internal IM connection. Only that originating IM chat receives it automatically. For any explicit IM delivery, use send_im with a specific permitted botId and targetId. External inbox notifications provide only counts; read_im_messages retrieves content.',
+    text: 'Write an ordinary reply for an inbound message on an internal IM connection. Only that originating IM chat receives it automatically. For explicit IM delivery, use send_im with a specific permitted botId and targetId. External inbox notifications provide only counts. read_im_messages reads both modes, read_im_resources opens quotes and forwards, and open_im_attachment explicitly fetches one file.',
   });
   return true;
 }

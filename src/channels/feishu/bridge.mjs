@@ -1,4 +1,5 @@
-import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
+import { captureExternal, isMultipleConnectSessionCommand, managedInboxInput } from '../shared/multiple-connect.mjs';
+import { createFeishuInboxProvider } from './inbox-provider.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { isPermissionCommand, runPermissionCommand } from '../shared/permission-command.mjs';
 import { randomUUID } from 'node:crypto';
@@ -8,6 +9,7 @@ import {
   conversationKey,
   conversationScope,
   extractInboundMessage,
+  feishuInboxContent,
   extractText,
   isAllowedSender,
   isBotSender,
@@ -846,6 +848,17 @@ export class FeishuHarnessBridge {
     this.#logger = logger;
     this.#approvals = new HarnessApprovalQueue({ label: 'Feishu', logger });
     this.#signal = signal;
+    const unbindInbox = harness.multipleConnect?.bindInboxProvider?.(createFeishuInboxProvider(client, {
+      signal,
+      allowHistoryItem: (item, chatType) => {
+        const conversationType = (item.chat_type ?? chatType) === 'p2p' ? 'direct' : 'group';
+        if (!this.#accessPolicy) return isAllowedSender({ sender: { sender_id: { open_id: item.sender?.id } } }, this.#allowedSenderOpenIds);
+        return evaluateInboundAccess(this.#accessPolicy, {
+          conversationType, senderIds: item.sender?.id, text: '',
+        }).allowed;
+      },
+    }));
+    if (unbindInbox) signal?.addEventListener('abort', unbindInbox, { once: true });
     ensureStatus(this.#status);
     this.#deferred = createDeferredDeliveryCoordinator({
       harness, state, signal, logger, watch: false,
@@ -1135,7 +1148,7 @@ export class FeishuHarnessBridge {
     }
     if (event?.message?.chat_type !== 'p2p'
       && this.#groupResponseMode === FEISHU_GROUP_RESPONSE_MODES.MENTION
-      && !addressed && this.#harness?.multipleConnect?.mode() !== 'external') {
+      && !addressed && !this.#harness?.multipleConnect) {
       return Promise.resolve();
     }
     if (this.#state.hasSeen(messageId) || this.#acceptedMessageIds.has(messageId)) {
@@ -1180,14 +1193,15 @@ export class FeishuHarnessBridge {
         }),
     });
     if (!access.allowed) {
-      if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
+      if (this.#harness?.multipleConnect?.mode() === 'external'
+        || conversationType === 'group' && !addressed && this.#groupResponseMode === FEISHU_GROUP_RESPONSE_MODES.MENTION) return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(event, messageId, access);
     }
-    if (captureExternal(this.#harness, () => ({
-      messageId, conversationId: key, senderId: senderOpenId(event), kind: conversationType,
-      text: commandText, attachments: [...(commandMessage.images ?? []), ...(commandMessage.files ?? [])],
-    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
+    if (captureExternal(this.#harness, () => this.#inboxRecord(event, key))
+      || isMultipleConnectSessionCommand(this.#harness, commandText)) return Promise.resolve();
+    if (this.#harness?.multipleConnect && conversationType === 'group'
+      && !addressed && this.#groupResponseMode === FEISHU_GROUP_RESPONSE_MODES.MENTION) return Promise.resolve();
     // Register a managed-topic root only after access is allowed, so a
     // rejected or ignored question never reserves a candidate slot.
     if (this.#mentionTopicReply
@@ -1700,6 +1714,14 @@ export class FeishuHarnessBridge {
     this.#status.lastError = null;
   }
 
+  #inboxRecord(event, conversationId) {
+    return {
+      messageId: event.message.message_id, conversationId, senderId: senderOpenId(event),
+      kind: event.message.chat_type === 'p2p' ? 'direct' : 'group',
+      ...feishuInboxContent(event, this.#client),
+    };
+  }
+
   async #handle(event, key, { alreadyRecorded = false } = {}) {
     this.#signal?.throwIfAborted();
     const messageId = event.message.message_id;
@@ -1710,13 +1732,15 @@ export class FeishuHarnessBridge {
       this.#status.messagesReceived += 1;
     }
 
-    const message = extractInboundMessage(event, this.#client);
+    let message = extractInboundMessage(event, this.#client);
+    const inbox = this.#harness?.multipleConnect && !event.batchSubmission ? this.#inboxRecord(event, key) : null;
     let text = message.content;
     let voiceTurnReplyTo = null;
+    const voiceMessage = event.message.message_type === 'audio' && this.#voice?.enabled;
     // 语音输入(渠道能力):音频消息先转写成文字并写回 message.content——
     // 下方命令识别与 #answerWithStream 都从 content 取文本。转写失败(或返回
     // 空文本)时保持原语义,走"仅支持文字、图片和文件"的明确降级提示。
-    if (event.message.message_type === 'audio' && this.#voice?.enabled) {
+    if (voiceMessage && !inbox) {
       try {
         const transcript = await this.#voice.transcribeIncoming(event, this.#client);
         if (transcript) {
@@ -1768,7 +1792,8 @@ export class FeishuHarnessBridge {
     // accept() 侧已用 nonEmptyString(content) 判定，两侧保持一致。
     const rawCommandText = text ? text.trim() : '';
     const commandText = !hasImages && !hasFiles && text ? rawCommandText : null;
-    if (!text && !hasImages && !hasFiles && !hasReply) {
+    if (!text && !hasImages && !hasFiles && !hasReply
+      && !inbox?.attachments.length && !inbox?.forwards.length && !inbox?.parts.length) {
       // An "@bot" with nothing else carries no instruction to parse, and the
       // menu card is what the reader is reaching for — answer it the way `/m`
       // does rather than with a "text only" notice. Kept to plain p2p text so a
@@ -1924,6 +1949,7 @@ export class FeishuHarnessBridge {
       return;
     }
 
+    if (inbox) message = managedInboxInput(this.#harness, message, inbox);
     this.#logger.info?.(`[dsh-feishu] processing ${event.message.chat_type} message ${messageId}`);
     // 语音回合状态在进入正常问答路径前才登记:上方命令分支(/help、菜单、
     // 会话列表等)与空内容分支均提前返回,提前登记会让状态遗留到下一回合,
@@ -1931,8 +1957,8 @@ export class FeishuHarnessBridge {
     // 本路径的 finally 统一清理回合状态。状态以会话 key 登记——与消息队列
     // 同粒度:同群不同话题的 key 不同、可并行处理,共用 chat_id 槽位会让
     // 后登记的回合覆盖先登记的,先完成的回合合成到后一条语音消息上。
-    if (voiceTurnReplyTo) {
-      this.#voiceTurns.set(key, { replyTo: voiceTurnReplyTo });
+    if (voiceTurnReplyTo || voiceMessage && inbox) {
+      this.#voiceTurns.set(key, { replyTo: voiceTurnReplyTo ?? messageId });
     }
     const batchSubmission = event.batchSubmission ?? null;
     let batchAskCompleted = false;

@@ -27,9 +27,13 @@ export async function fetchFileStream(url, {
   headers,
   signal,
   allowedHosts,
+  maxBytes,
 } = {}) {
   const target = new URL(url);
   if (target.protocol !== 'https:') throw new Error('File download URL must use HTTPS');
+  if (maxBytes !== undefined && (target.username || target.password || target.port && target.port !== '443')) {
+    throw new Error('Invalid file download URL');
+  }
   if (!hostedByMessagingPlatform(target, allowedHosts)) {
     throw new Error('File download URL is not hosted by the messaging platform');
   }
@@ -53,7 +57,17 @@ export async function fetchFileStream(url, {
     error.status = response?.status;
     throw error;
   }
-  if (response.body?.[Symbol.asyncIterator]) return { stream: response.body };
+  const declared = response.headers?.get?.('content-length');
+  const size = declared && /^\d+$/.test(declared) ? Number(declared) : undefined;
+  if (maxBytes !== undefined && size > maxBytes) {
+    await cancelResponseBody(response);
+    throw Object.assign(new Error('Attachment exceeds the download budget.'), { code: 'attachment-limit' });
+  }
+  if (response.body?.[Symbol.asyncIterator]) return { stream: response.body, size };
+  if (maxBytes !== undefined) {
+    await cancelResponseBody(response);
+    throw new Error('File download returned no readable stream');
+  }
   if (typeof response.arrayBuffer === 'function') {
     const data = Buffer.from(await response.arrayBuffer());
     return {

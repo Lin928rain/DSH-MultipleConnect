@@ -26,7 +26,7 @@ for (const name of hostLibraries) {
   assert.ok(host.includes(name), 'Keep the Host import external for ' + name);
 }
 for (const marker of [
-  '/dsh-multiple-connect', 'send_im', 'read_im_messages', 'list_im_conversations',
+  '/dsh-multiple-connect', 'send_im', 'read_im_messages', 'list_im_conversations', 'read_im_resources', 'open_im_attachment',
   'message_break', 'proactive_set', 'send_group_msg', 'send_private_msg',
 ]) {
   assert.ok(host.includes(marker), 'Missing host feature ' + marker);

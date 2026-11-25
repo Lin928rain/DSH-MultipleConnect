@@ -1,4 +1,4 @@
-import { captureExternal, isMultipleConnectSessionCommand } from '../shared/multiple-connect.mjs';
+import { captureExternal, isMultipleConnectSessionCommand, managedInboxInput } from '../shared/multiple-connect.mjs';
 import { BusyMessageDispatcher, canAutomaticallySteer } from '../shared/busy-message-dispatcher.mjs';
 import { createDeferredDeliveryCoordinator, deferredOutcomeText } from '../shared/deferred-delivery-coordinator.mjs';
 import {
@@ -7,6 +7,7 @@ import {
   extractWeixinImages,
   extractWeixinReplyReference,
   extractWeixinText,
+  weixinInboxContent,
   splitWeixinText,
   weixinMessageId,
   weixinMessageTimestampMs,
@@ -250,6 +251,14 @@ function hasWeixinFileItems(message) {
     && message.item_list.some((item) => item?.file_item && typeof item.file_item === 'object');
 }
 
+function weixinInboxRecord(message, sender, messageId) {
+  return {
+    messageId, conversationId: sender, senderId: sender,
+    ...weixinInboxContent(message),
+    receivedAt: Number(message.create_time_ms) || weixinMessageTimestampMs(messageId),
+  };
+}
+
 function isNativeWeixinText(message) {
   return Array.isArray(message?.item_list)
     && message.item_list.length > 0
@@ -392,6 +401,10 @@ export class WeixinHarnessBridge {
     this.#maxMessageChars = maxMessageChars;
     this.#typingKeepaliveMs = typingKeepaliveMs;
     this.#signal = signal;
+    const unbindInbox = harness.multipleConnect?.bindInboxProvider?.({
+      open: (source, limits) => api.openInboxMedia(source, limits),
+    });
+    if (unbindInbox) signal?.addEventListener('abort', unbindInbox, { once: true });
     this.#messageBreak = messageBreak === true;
     this.#streaming = streaming !== false;
     this.#humanize = humanize ?? null;
@@ -455,11 +468,8 @@ export class WeixinHarnessBridge {
       seq: message.seq,
       messageTimeMs: message.create_time_ms ?? weixinMessageTimestampMs(messageId),
     }).catch((error) => this.#logger.warn?.('[dsh-weixin] failed to persist conversation context:', error));
-    if (captureExternal(this.#harness, () => ({
-      messageId, conversationId: sender, senderId: sender, text: commandText,
-      attachments: message.item_list?.filter(({ type }) => type !== 1).map(({ type }) => ({ type: String(type) })),
-      receivedAt: message.create_time_ms,
-    })) || isMultipleConnectSessionCommand(this.#harness, commandText)) {
+    if (captureExternal(this.#harness, () => weixinInboxRecord(message, sender, messageId))
+      || isMultipleConnectSessionCommand(this.#harness, commandText)) {
       this.#acceptedMessageIds.delete(messageId);
       return Promise.resolve();
     }
@@ -610,7 +620,7 @@ export class WeixinHarnessBridge {
     alreadyRecorded = false,
     batchSubmission = null,
   } = {}) {
-    const preparedMessage = prefetchInboundFiles(
+    const preparedMessage = this.#harness?.multipleConnect ? undefined : prefetchInboundFiles(
       this.#inboundMessage(message),
       { signal: this.#signal },
     );
@@ -856,12 +866,13 @@ export class WeixinHarnessBridge {
     let promptRecorded = false;
     let preAsk = null;
     try {
-      const promptMessage = preparedMessage ?? this.#inboundMessage(message);
+      let promptMessage = preparedMessage ?? this.#inboundMessage(message);
+      const inbox = this.#harness?.multipleConnect && !batchSubmission ? weixinInboxRecord(message, sender, messageId) : null;
       const text = promptMessage.content;
       const hasImages = hasInboundImages(promptMessage);
       const hasFiles = hasInboundFiles(promptMessage);
       const hasReply = hasReplyReference(promptMessage);
-      if (!text && !hasImages && !hasFiles && !hasReply) {
+      if (!text && !hasImages && !hasFiles && !hasReply && !inbox?.attachments.length) {
         await this.#send(sender, t('目前支持文字、图片、文件，以及微信已转成文字的语音消息。'), contextToken, runId);
         await this.#state.markSeen(messageId);
         return;
@@ -910,6 +921,7 @@ export class WeixinHarnessBridge {
         return;
       }
 
+      if (inbox) promptMessage = managedInboxInput(this.#harness, { ...promptMessage, content: inbox.text }, inbox);
       let answer;
       let artifacts = [];
       let messageBreakHandler = null;
@@ -923,7 +935,7 @@ export class WeixinHarnessBridge {
       try {
         let content = hasImages || hasReply
           ? await promptContentForInboundMessage(promptMessage, { signal: this.#signal, deferImages: true })
-          : undefined;
+          : inbox ? promptMessage.content : undefined;
         const captured = this.#acceptedMessageIds.get(messageId);
         let contextEnhanced = false;
         if (captured) {

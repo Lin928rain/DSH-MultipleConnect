@@ -1,9 +1,12 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { registerManagementRpc } from '../management-rpc.mjs';
 import { resolveRpcAuthority } from './rpc-authority.mjs';
 import { ConnectStore } from './connect-store.mjs';
+import { InboxStorage, readInboxLayout } from './inbox-storage.mjs';
+import { inboxAttachments, inboxReply } from '../../src/channels/shared/multiple-connect.mjs';
 
 export const CONNECT_RPC = '/dsh-multiple-connect';
 
@@ -112,10 +115,22 @@ export function createDshMainHost(ctx) {
 }
 
 export function createMultipleConnect(ctx, config, deliveryService, {
-  store = new ConnectStore(join(connectDataDirectory(config), 'connections.sqlite')),
+  store,
   host = createDshMainHost(ctx),
   logger = console,
 } = {}) {
+  const home = connectDataDirectory(config);
+  const { configured, ...layout } = readInboxLayout(home);
+  const database = join(layout.messageDirectory, 'connections.sqlite');
+  if (!store && configured && !existsSync(database)) {
+    throw Object.assign(new Error('The configured message database is unavailable. Restore access and restart the Host. ' + database),
+      { code: 'inbox-storage-offline' });
+  }
+  store ??= new ConnectStore(database);
+  const storage = new InboxStorage(home, store, layout);
+  const providers = new Map();
+  const recentPreviews = new Map();
+  let previewCount = 0;
   const main = new MainConversation(store, host);
   let instanceId = store.getState('instance');
   if (!instanceId) {
@@ -147,7 +162,7 @@ export function createMultipleConnect(ctx, config, deliveryService, {
     return pending;
   }
 
-  const timer = setInterval(kick, 10_000);
+  const timer = setInterval(() => { void kick(); void storage.sweep(); }, 10_000);
   timer.unref?.();
   const unwatch = ctx.on?.('domain/changed', (change) => {
     if (change?.domain === 'workspace' || change?.domainName === 'workspace') void kick();
@@ -157,7 +172,8 @@ export function createMultipleConnect(ctx, config, deliveryService, {
   void kick();
 
   const api = {
-    main, store, kick,
+    main, store, storage, kick,
+    provider: (botId) => providers.get(botId),
     connection(botId, harness) {
       return {
         botId,
@@ -165,8 +181,35 @@ export function createMultipleConnect(ctx, config, deliveryService, {
         main,
         activeTurns: new Map(),
         mode: () => store.settings(botId).mode,
+        recall: ({ messageId, chatId }) => store.recall(botId, messageId, chatId),
+        bindInboxProvider(provider) {
+          providers.set(botId, provider);
+          return () => { if (providers.get(botId) === provider) providers.delete(botId); };
+        },
         receive(message) {
-          const mode = store.receive(botId, message);
+          const saved = {
+            ...message, attachments: inboxAttachments(message.attachments), replyTo: inboxReply(message.replyTo),
+          };
+          const mode = store.receive(botId, saved);
+          const provider = providers.get(botId);
+          const scope = [botId, saved.conversationId, saved.messageId, undefined];
+          const key = JSON.stringify(scope);
+          if (mode !== 'silent' && !stopped && provider?.open && previewCount < 8
+            && saved.attachments.some((item) => item.preview && item.source)
+            && Date.now() - (recentPreviews.get(key) ?? 0) > 60_000) {
+            recentPreviews.set(key, Date.now());
+            if (recentPreviews.size > 512) recentPreviews.delete(recentPreviews.keys().next().value);
+            const authorize = () => {
+              const current = store.message(...scope.slice(0, 3));
+              return providers.get(botId) === provider && current && !current.details.deleted
+                && !current.details.updatedAt && (!provider.authorize || provider.authorize(saved.conversationId));
+            };
+            for (const item of saved.attachments.filter((item) => item.preview && item.source).slice(0, Math.min(4, 8 - previewCount))) {
+              previewCount += 1;
+              void storage.download(scope, item, (limits) => provider.open(item.source, limits), { preview: true, authorize })
+                .catch(() => undefined).finally(() => { previewCount -= 1; });
+            }
+          }
           if (mode === 'notify') void kick();
           return mode;
         },
@@ -177,6 +220,7 @@ export function createMultipleConnect(ctx, config, deliveryService, {
       clearInterval(timer);
       unwatch?.();
       await pending;
+      await storage.close();
       store.close();
     },
   };
@@ -195,8 +239,11 @@ export function installConnectRpc(ctx, runtime, deliveryService, config, snowlum
           })) ?? [],
           bots: bots.map((bot) => ({ ...bot, settings: runtime.store.settings(bot.botId) })),
           snowluma: snowluma.list(),
+          storage: await runtime.storage.status(),
         } };
       }
+      if (endpoint === 'storage.set') return { ok: true, value: await runtime.storage.configure(payload) };
+      if (endpoint === 'storage.approve') return { ok: true, value: runtime.storage.approve(payload.id) };
       if (endpoint === 'connection.set') {
         const bots = await deliveryService.listBots();
         if (!bots.some(({ botId }) => botId === payload.botId)) throw new Error('Unknown connection');
@@ -222,4 +269,10 @@ export function installConnectRpc(ctx, runtime, deliveryService, config, snowlum
       return { ok: false, error: { code: 'multiple-connect-settings', message: error.message } };
     }
   }, { authority: resolveRpcAuthority(config.rpcAuthority) });
+}
+
+export function installStorageErrorRpc(ctx, config, error) {
+  return registerManagementRpc(ctx, CONNECT_RPC, () => ({
+    ok: false, error: { code: error.code, message: error.message },
+  }), { authority: resolveRpcAuthority(config.rpcAuthority) });
 }

@@ -23,7 +23,7 @@ import { installDeliveryHttp } from './delivery-http.mjs';
 import { createDeliveryService } from './delivery-service.mjs';
 import { installInboundTtlRpc } from './inbound-ttl-rpc.mjs';
 import { installInjectedContext } from './injected-context.mjs';
-import { createMultipleConnect, installConnectRpc, connectDataDirectory } from './multiple-connect.mjs';
+import { createMultipleConnect, installConnectRpc, installStorageErrorRpc, connectDataDirectory } from './multiple-connect.mjs';
 import { installInboxTools } from './inbox-tools.mjs';
 import { createSnowlumaManager } from './snowluma.mjs';
 import { join } from 'node:path';
@@ -202,10 +202,18 @@ export function createImHostPlugin(internals = {}) {
     }
 
     const logger = typeof ctx?.logger === 'function' ? ctx.logger(name) : (ctx?.logger ?? console);
-    const runtime = typeof ctx?.workspaceController?.initializeDefault === 'function'
-      && typeof ctx?.sessionController?.create === 'function'
-      ? createMultipleConnect(ctx, config, deliveryService, { logger })
-      : undefined;
+    let runtime;
+    if (typeof ctx?.workspaceController?.initializeDefault === 'function'
+      && typeof ctx?.sessionController?.create === 'function') {
+      try {
+        runtime = createMultipleConnect(ctx, config, deliveryService, { logger });
+      } catch (error) {
+        if (error.code !== 'inbox-storage-offline') throw error;
+        logger.error?.('[dsh-multiple-connect]', error.message);
+        installStorageErrorRpc(ctx, config, error);
+        return;
+      }
+    }
     if (runtime) {
       const snowluma = createSnowlumaManager({ ctx, config, runtime, deliveryService, logger });
       ctx.effect(() => async () => {
@@ -262,7 +270,7 @@ export function createImHostPlugin(internals = {}) {
         }
         if (config.imSendTool !== false) {
           installImSendTool(toolCtx, { send: imSend });
-          if (runtime) installInboxTools(toolCtx, runtime.store, deliveryService);
+          if (runtime) installInboxTools(toolCtx, runtime, deliveryService);
         }
       });
     } else {
@@ -273,7 +281,7 @@ export function createImHostPlugin(internals = {}) {
       }
       if (config.imSendTool !== false) {
         installImSendTool(ctx, { send: imSend });
-        if (runtime) installInboxTools(ctx, runtime.store, deliveryService);
+        if (runtime) installInboxTools(ctx, runtime, deliveryService);
       }
     }
     try {

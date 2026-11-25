@@ -323,14 +323,15 @@ export function normalizeTelegramUpdate(update, {
   // stays intact. Outbound only — inbound quote parsing (replyTo) is
   // unaffected.
   replyQuote = true,
+  richInbox = false,
 }) {
-  const message = update?.message;
+  const message = update?.message ?? (richInbox ? update?.edited_message ?? update?.channel_post ?? update?.edited_channel_post : undefined);
   const chatId = message?.chat?.id;
-  const senderId = message?.from?.id;
+  const senderId = message?.from?.id ?? (richInbox ? message?.sender_chat?.id ?? chatId : undefined);
   const messageId = message?.message_id;
   if (!Number.isSafeInteger(update?.update_id) || chatId === undefined || senderId === undefined
     || !Number.isSafeInteger(messageId)) return null;
-  if (!['private', 'group', 'supergroup'].includes(message.chat?.type)) return null;
+  if (!['private', 'group', 'supergroup', ...(richInbox ? ['channel'] : [])].includes(message.chat?.type)) return null;
   if (isTelegramServiceMessage(message)) return null;
   const direct = message.chat.type === 'private';
   const addressed = direct
@@ -383,6 +384,54 @@ export function normalizeTelegramUpdate(update, {
       messageThreadId,
     },
     connectionTestTarget: { chatId, messageThreadId },
+    ...(richInbox ? { inbox: {
+      ...telegramInboxRecord(message, update),
+      ...(replyTo ? { replyTo: {
+        ...replyTo, attachments: telegramInboxRecord(message.reply_to_message ?? message.external_reply ?? {}, {}).attachments,
+      } } : {}),
+    } } : {}),
+  };
+}
+
+function telegramInboxRecord(message, update) {
+  const attachments = [];
+  const media = (type, file, preview = false, mediaType = file?.mime_type) => {
+    if (!file?.file_id) return;
+    const name = file.file_name ?? (mediaType === 'image/jpeg' ? `${file.file_unique_id ?? 'photo'}.jpg` : file.file_unique_id);
+    attachments.push({ type, name, mediaType,
+      size: fileSize(file.file_size), ...(preview ? { preview: true } : {}), source: { fileId: file.file_id } });
+  };
+  const photos = (Array.isArray(message.photo) ? message.photo : []).filter((file) => file?.file_id)
+    .sort((a, b) => photoScore(a) - photoScore(b));
+  if (photos.length > 1) media('image', photos[0], true, 'image/jpeg');
+  if (photos.length) media('image', photos.at(-1), false, 'image/jpeg');
+  for (const [key, type] of Object.entries({
+    document: imageTypeForDocument(message.document) ? 'image' : 'file', animation: 'video',
+    video: 'video', video_note: 'video', audio: 'audio', voice: 'audio', sticker: 'sticker',
+  })) {
+    const item = message[key];
+    if (!item || (key === 'document' && message.animation)) continue;
+    media(type, item);
+    media('image', item.thumbnail, true, 'image/jpeg');
+  }
+  const parts = [];
+  const { location, venue, contact, poll, dice, forward_origin: origin } = message;
+  if (location || venue?.location) {
+    const point = location ?? venue.location;
+    parts.push({ type: 'location', latitude: point.latitude, longitude: point.longitude, title: venue?.title, address: venue?.address });
+  }
+  if (contact) parts.push({ type: 'contact', name: [contact.first_name, contact.last_name].filter(Boolean).join(' '), phone: contact.phone_number });
+  if (poll) parts.push({ type: 'poll', question: poll.question, options: poll.options?.map(({ text }) => text), closed: poll.is_closed });
+  if (dice) parts.push({ type: 'dice', emoji: dice.emoji, value: dice.value });
+  return {
+    messageId: String(message.message_id), attachments, parts,
+    receivedAt: Number.isSafeInteger(message.date) ? message.date * 1000 : undefined,
+    ...((update.edited_message || update.edited_channel_post) ? { updatedAt: update.update_id } : {}),
+    threadId: message.message_thread_id === undefined ? undefined : String(message.message_thread_id),
+    albumId: message.media_group_id,
+    forwardOrigin: origin && { type: origin.type, date: origin.date, senderId: origin.sender_user?.id ?? origin.sender_chat?.id ?? origin.chat?.id,
+      name: origin.sender_user_name ?? origin.sender_user?.first_name ?? origin.sender_chat?.title ?? origin.chat?.title,
+      messageId: origin.message_id, authorSignature: origin.author_signature },
   };
 }
 
@@ -1231,6 +1280,7 @@ export class TelegramRuntime {
   #bridge = null;
   #abortController = null;
   #pollTask = null;
+  #unbindInbox;
   #starting = null;
   // True only while #start() is between "started connecting" and "ready",
   // which is the one window a skipped refresh must be reconciled. A refresh on
@@ -1356,6 +1406,10 @@ export class TelegramRuntime {
       if (String(bot?.id ?? '') !== this.#config.platformId || bot?.is_bot !== true) {
         throw new Error('Telegram token identity does not match the saved bot');
       }
+      this.#unbindInbox = this.#harness.multipleConnect?.bindInboxProvider?.({
+        open: ({ fileId }, limits) => api.downloadFileStream({ fileId, ...limits,
+          signal: AbortSignal.any([limits.signal, controller.signal]) }),
+      });
       const webhook = await api.getWebhookInfo({ signal: controller.signal });
       if (typeof webhook?.url === 'string' && webhook.url) {
         const error = new Error(t('该 Telegram 机器人已配置 Webhook，请先在原服务中移除 Webhook 后重试。'));
@@ -1395,7 +1449,8 @@ export class TelegramRuntime {
 
       let cursor = this.#state.cursor();
       if (cursor === null) {
-        const latest = await api.getUpdates({ offset: -1, timeout: 0, signal: controller.signal });
+        const latest = await api.getUpdates({ offset: -1, timeout: 0, signal: controller.signal,
+          ...(this.#harness.multipleConnect ? { richInbox: true } : {}) });
         cursor = latest.length > 0 ? latest.at(-1).update_id + 1 : 0;
         await this.#state.setCursor(cursor);
       }
@@ -1502,7 +1557,8 @@ export class TelegramRuntime {
   async #poll(initialCursor, signal) {
     let cursor = initialCursor;
     while (!signal.aborted) {
-      const updates = await this.#api.getUpdates({ offset: cursor, timeout: 25, signal });
+      const updates = await this.#api.getUpdates({ offset: cursor, timeout: 25, signal,
+        ...(this.#harness.multipleConnect ? { richInbox: true } : {}) });
       this.#status.lastCheckedAt = Date.now();
       if (signal.aborted) return;
       // All updates have arrived together; cursor persistence must not move the
@@ -1543,6 +1599,7 @@ export class TelegramRuntime {
           loadFileStream: (fileId, options) => this.#api.downloadFileStream({ fileId, ...options }),
           loadReplyContent: (reference, options) => this.#loadReplyContent(reference, options),
           replyQuote: this.#humanize?.getSettings()?.replyQuote !== false,
+          richInbox: Boolean(this.#harness.multipleConnect),
         });
         if (message) {
           void this.#bridge.accept(message, { contextSnapshot }).catch((error) => {
@@ -1560,6 +1617,8 @@ export class TelegramRuntime {
   }
 
   async stop() {
+    this.#unbindInbox?.();
+    this.#unbindInbox = undefined;
     const pollTask = this.#pollTask;
     const bridge = this.#bridge;
     const httpTransport = this.#httpTransport;
