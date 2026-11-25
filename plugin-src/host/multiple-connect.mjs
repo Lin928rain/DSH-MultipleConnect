@@ -1,7 +1,10 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, normalize, parse } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { registerManagementRpc } from '../management-rpc.mjs';
 import { resolveRpcAuthority } from './rpc-authority.mjs';
 import { ConnectStore } from './connect-store.mjs';
@@ -9,6 +12,7 @@ import { InboxStorage, readInboxLayout } from './inbox-storage.mjs';
 import { inboxAttachments, inboxReply } from '../../src/channels/shared/multiple-connect.mjs';
 
 export const CONNECT_RPC = '/dsh-multiple-connect';
+const execFileAsync = promisify(execFile);
 
 export function connectDataDirectory(config) {
   const home = config.dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh');
@@ -30,10 +34,37 @@ export class MainConversation {
   }
 
   ensure() {
-    if (!this.#ensuring) {
-      this.#ensuring = this.#reconcile().finally(() => { this.#ensuring = undefined; });
-    }
-    return this.#ensuring;
+    return this.#ensuring ?? this.#track(this.#reconcile());
+  }
+
+  setup(workspaceId, signal) {
+    return this.#track(Promise.resolve(this.#ensuring).catch(() => undefined).then(async () => {
+      signal?.throwIfAborted();
+      const existing = this.current();
+      if (existing) {
+        if (workspaceId !== undefined && workspaceId !== existing.workspaceId) {
+          throw new Error('The main conversation already has a workspace');
+        }
+        return existing;
+      }
+      const workspace = workspaceId === undefined
+        ? await this.host.registerDefaultWorkspace(signal)
+        : await this.host.workspace(workspaceId);
+      if (!workspace?.workspaceId) throw new Error('Unknown workspace');
+      signal?.throwIfAborted();
+      this.store.setState('workspace', workspace.workspaceId);
+      const main = await this.#reconcile();
+      if (!main) throw new Error('The main conversation could not be created');
+      return main;
+    }));
+  }
+
+  #track(operation) {
+    const tracked = operation.finally(() => {
+      if (this.#ensuring === tracked) this.#ensuring = undefined;
+    });
+    this.#ensuring = tracked;
+    return tracked;
   }
 
   async #reconcile() {
@@ -75,16 +106,60 @@ function service(ctx, name) {
   return typeof ctx.get === 'function' ? ctx.get(name, false) : ctx[name];
 }
 
+async function defaultWorkspacePath(controller, signal) {
+  // Honor a Documents override on the DSH Workspace Controller when it exposes one.
+  let documents = controller.config?.documentsDirectory;
+  try {
+    if (documents === undefined) {
+      const commands = {
+        win32: [join(process.env.SystemRoot ?? 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+          ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+            '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
+            + '[Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments, '
+            + '[Environment+SpecialFolderOption]::DoNotVerify)']],
+        darwin: ['/usr/bin/osascript', ['-e', 'POSIX path of (path to documents folder from user domain without folder creation)']],
+        linux: ['xdg-user-dir', ['DOCUMENTS']],
+      };
+      const [command, args] = commands[process.platform] ?? [];
+      if (!command) throw new Error('Unsupported platform');
+      const { stdout } = await execFileAsync(command, args, { signal, windowsHide: true, encoding: 'utf8' });
+      documents = stdout.replace(/[\r\n]+$/u, '');
+      if (process.platform === 'linux' && normalize(documents) === normalize(homedir())) documents = '';
+    }
+    if (typeof documents !== 'string' || !isAbsolute(documents)
+      || (process.platform === 'win32' && /^[\\/]$/u.test(parse(documents).root))) {
+      throw new Error('Documents path is not fully qualified');
+    }
+  } catch (cause) {
+    signal?.throwIfAborted();
+    throw Object.assign(new Error('Cannot locate the DSH host Documents folder. Choose an existing workspace.', { cause }),
+      { code: 'default-workspace-unavailable' });
+  }
+  return join(documents, 'deepseek-harness', 'default-workspace');
+}
+
 export function createDshMainHost(ctx) {
   const host = {
-    async workspace(selected) {
+    async workspace(selected, signal = AbortSignal.timeout(15_000)) {
       const registry = service(ctx, 'workspaceRegistry');
       if (selected) {
         const workspace = registry?.get(selected);
         return workspace && { workspaceId: String(workspace.id) };
       }
-      const result = await ctx.workspaceController.initializeDefault(AbortSignal.timeout(15_000));
+      const result = await ctx.workspaceController.initializeDefault(signal);
       return result?.workspace;
+    },
+    async registerDefaultWorkspace(requestSignal) {
+      const timeout = AbortSignal.timeout(15_000);
+      const signal = requestSignal ? AbortSignal.any([requestSignal, timeout]) : timeout;
+      const existing = await host.workspace(undefined, signal);
+      if (existing) return existing;
+      const path = await defaultWorkspacePath(ctx.workspaceController, signal);
+      signal.throwIfAborted();
+      await mkdir(path, { recursive: true });
+      signal.throwIfAborted();
+      const { workspace } = await ctx.workspaceController.create({ path });
+      return workspace;
     },
     available({ workspaceId, sessionId }) {
       const registry = service(ctx, 'workspaceRegistry');
@@ -257,16 +332,16 @@ export function installConnectRpc(ctx, runtime, deliveryService, config, snowlum
       }
       if (endpoint === 'workspace.set') {
         const workspaceId = payload.workspaceId;
-        if (!service(ctx, 'workspaceRegistry')?.get(workspaceId)) throw new Error('Unknown workspace');
-        if (runtime.main.current()) throw new Error('The main conversation already has a workspace');
-        runtime.store.setState('workspace', workspaceId);
-        return { ok: true, value: await runtime.main.ensure() };
+        if (typeof workspaceId !== 'string' || !workspaceId) throw new Error('Unknown workspace');
+        return { ok: true, value: await runtime.main.setup(workspaceId, signal) };
       }
+      if (endpoint === 'main.setup-default') return { ok: true, value: await runtime.main.setup(undefined, signal) };
       if (endpoint === 'snowluma.set') return { ok: true, value: await snowluma.configure(payload) };
       if (endpoint === 'snowluma.delete') return { ok: true, value: await snowluma.remove(payload.botId) };
       throw new Error('Unknown settings operation');
     } catch (error) {
-      return { ok: false, error: { code: 'multiple-connect-settings', message: error.message } };
+      const code = error.code === 'default-workspace-unavailable' ? error.code : 'multiple-connect-settings';
+      return { ok: false, error: { code, message: error.message } };
     }
   }, { authority: resolveRpcAuthority(config.rpcAuthority) });
 }

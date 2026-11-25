@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as React from 'react';
+import TestRenderer from 'react-test-renderer';
 import { ConnectStore, DEFAULT_CONNECTION_SETTINGS } from '../plugin-src/host/connect-store.mjs';
-import { createMultipleConnect, MainConversation } from '../plugin-src/host/multiple-connect.mjs';
+import { createDshMainHost, createMultipleConnect, installConnectRpc, MainConversation } from '../plugin-src/host/multiple-connect.mjs';
+import { MultipleConnectSettings } from '../plugin-src/client/multiple-connect-settings.js';
 import { createDeliveryService } from '../plugin-src/host/delivery-service.mjs';
 import { askInWorkspaceSession } from '../src/channels/shared/workspace-session.mjs';
 import { captureExternal } from '../src/channels/shared/multiple-connect.mjs';
@@ -85,6 +88,92 @@ test('one current main is initialized once and automatically replaced after arch
     assert.deepEqual(await main.ensure(), second);
     assert.deepEqual(initialized, ['session-1', 'session-2']);
   } finally { store.close(); }
+});
+
+test('one click registers the default folder and retries an incomplete main without duplicates', async (t) => {
+  const documentsDirectory = await mkdtemp(join(tmpdir(), 'multiple-connect-documents-'));
+  t.after(() => rm(documentsDirectory, { recursive: true, force: true }));
+  const store = new ConnectStore(':memory:');
+  t.after(() => store.close());
+  const path = join(documentsDirectory, 'deepseek-harness', 'default-workspace');
+  const workspace = { id: 'registered-default', sessionIds: [] };
+  const workspaces = new Map([['project', { id: 'project', sessionIds: [] }]]);
+  let registrations = 0;
+  let creations = 0;
+  let renameAttempts = 0;
+  let route;
+  const ctx = {
+    connection: { fetch: { register(value) { route = value; } } },
+    workspaceRegistry: { get: (id) => workspaces.get(id), archivedSessionIds: [] },
+    workspaceController: {
+      config: { documentsDirectory },
+      initializeDefault: async () => undefined,
+      create: async (input) => {
+        registrations += 1;
+        assert.deepEqual(input, { path });
+        assert.ok((await stat(path)).isDirectory());
+        workspaces.set(workspace.id, workspace);
+        return { workspace: { workspaceId: workspace.id } };
+      },
+    },
+    sessionController: {
+      create: async ({ workspaceId }) => {
+        assert.equal(workspaceId, workspace.id);
+        const sessionId = `created-${++creations}`;
+        workspace.sessionIds.push(sessionId);
+        return { sessionId };
+      },
+      rename: async () => { if (++renameAttempts === 1) throw new Error('retry rename'); },
+    },
+    agents: { get: () => ({ session: {} }) },
+    permissionPresets: { set: (_session, preset) => assert.equal(preset, 'danger-full-access') },
+  };
+  const main = new MainConversation(store, createDshMainHost(ctx));
+  installConnectRpc(ctx, { main }, {}, {}, {});
+
+  const rpc = async (method, payload = {}) => {
+    const endpoint = 'dsh-im/dsh-multiple-connect';
+    const response = await route.fetch(new Request('http://127.0.0.1/api/' + endpoint, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'setup', method: endpoint, payload: { method, payload } }),
+    }));
+    return (await response.json()).result;
+  };
+  assert.equal(await main.ensure(), undefined);
+  assert.equal(registrations, 0);
+  const first = await rpc('main.setup-default', { path: documentsDirectory });
+  assert.equal(first.error.message, 'retry rename');
+  const [recovered, duplicate, competing] = await Promise.all([
+    rpc('main.setup-default'), rpc('main.setup-default'), rpc('workspace.set', { workspaceId: 'project' }),
+  ]);
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(recovered, duplicate);
+  assert.equal(competing.ok, false);
+  assert.equal(recovered.value.workspaceId, workspace.id);
+  assert.equal(store.getState('workspace'), workspace.id);
+  assert.equal(registrations, 2);
+  assert.equal(workspaces.size, 2);
+  assert.equal(creations, 1);
+});
+
+test('main conversation settings can create a main in the default workspace with one click', async (t) => {
+  const { act, create } = TestRenderer;
+  const calls = [];
+  const status = { workspaces: [{ workspaceId: 'project', title: 'Project' }], bots: [] };
+  async function rpc(method, payload) {
+    calls.push({ method, payload });
+    if (method === 'status') return { ok: true, value: { ...status } };
+    assert.equal(method, 'main.setup-default');
+    status.main = { sessionId: 'new-main' };
+    return { ok: true, value: status.main };
+  }
+  let renderer;
+  await act(async () => { renderer = create(React.createElement(MultipleConnectSettings, { rpc })); });
+  t.after(() => act(() => renderer.unmount()));
+  const buttons = () => renderer.root.findAllByType('button');
+  await act(async () => buttons().find(({ children }) => children.includes('使用默认工作区创建主对话')).props.onClick());
+  assert.deepEqual(calls.map(({ method }) => method), ['status', 'main.setup-default', 'status']);
+  assert.ok(buttons().some(({ children }) => children.includes('打开主对话')));
 });
 
 test('two internal chats retain their own delivery and a queued turn follows main archival', async () => {

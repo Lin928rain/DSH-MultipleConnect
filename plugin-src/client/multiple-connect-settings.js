@@ -15,6 +15,9 @@ function field(text, input) {
 
 async function invoke(rpc, endpoint, payload) {
   const result = await rpc(endpoint, payload);
+  if (result?.error?.code === 'default-workspace-unavailable') {
+    throw new Error('无法定位 DSH 宿主的文档目录，请选择一个已有工作区。');
+  }
   if (result?.ok !== true) throw new Error(result?.error?.message || 'Connection settings are unavailable');
   return result.value;
 }
@@ -118,6 +121,16 @@ export function MultipleConnectSettings({ rpc, openSession }) {
   const { status, error, save } = useConnections(rpc);
   const [workspace, setWorkspace] = React.useState('');
   const [confirmArchive, setConfirmArchive] = React.useState(false);
+  const [creatingMain, setCreatingMain] = React.useState(false);
+  async function createMain(useDefault) {
+    setCreatingMain(true);
+    try {
+      if (useDefault) await save('main.setup-default', {});
+      else await save('workspace.set', { workspaceId: workspace });
+    } finally {
+      setCreatingMain(false);
+    }
+  }
   if (!rpc) return null;
   return h('section', { className: 'dim-humanizePanel' },
     h('h3', null, label('主对话与连接模式', 'Main conversation and connection modes')),
@@ -130,12 +143,15 @@ export function MultipleConnectSettings({ rpc, openSession }) {
             void save('main.archive', { sessionId: status.main.sessionId });
           })
           : button(label('归档主对话', 'Archive main conversation'), () => setConfirmArchive(true)))
-      : status && h('div', null,
+      : status && h('div', { 'aria-busy': creatingMain },
+        button('使用默认工作区创建主对话',
+          () => void createMain(true), creatingMain),
+        creatingMain && h('p', { role: 'status' }, '正在创建主对话…'),
         field(label('选择主对话工作区', 'Select the main workspace'),
-          h('select', { value: workspace, onChange: (event) => setWorkspace(event.target.value) },
+          h('select', { value: workspace, disabled: creatingMain, onChange: (event) => setWorkspace(event.target.value) },
             h('option', { value: '' }, label('请选择', 'Choose a workspace')),
             status.workspaces.map((item) => h('option', { key: item.workspaceId, value: item.workspaceId }, item.title)))),
-        button(label('创建主对话', 'Create main conversation'), () => void save('workspace.set', { workspaceId: workspace }), !workspace)),
+        button(label('创建主对话', 'Create main conversation'), () => void createMain(false), creatingMain || !workspace)),
     error && h('p', { role: 'alert' }, error),
     status?.storage && h(StorageSettings, { storage: status.storage, save }),
     status?.bots.map((bot) => h(ConnectionSettings, {

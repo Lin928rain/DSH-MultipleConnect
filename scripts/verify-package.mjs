@@ -37,12 +37,12 @@ for (const name of hostLibraries) {
   assert.ok(host.includes(name), 'Keep the Host import external for ' + name);
 }
 for (const marker of [
-  '/dsh-multiple-connect', 'send_im', 'read_im_messages', 'list_im_conversations', 'read_im_resources', 'open_im_attachment',
+  '/dsh-multiple-connect', 'main.setup-default', 'send_im', 'read_im_messages', 'list_im_conversations', 'read_im_resources', 'open_im_attachment',
   'message_break', 'proactive_set', 'send_group_msg', 'send_private_msg',
 ]) {
   assert.ok(host.includes(marker), 'Missing host feature ' + marker);
 }
-for (const marker of ['/dsh-multiple-connect', 'snowluma.set', 'connection.set', '/api/dsh-proactive']) {
+for (const marker of ['/dsh-multiple-connect', 'main.setup-default', 'snowluma.set', 'connection.set', '/api/dsh-proactive']) {
   assert.ok(client.includes(marker), 'Missing client feature ' + marker);
 }
 assert.doesNotMatch(client + host, /private-bot-token|must-be-rolled-back|DEEPSEEK_API_KEY=/u);
