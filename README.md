@@ -12,7 +12,7 @@
 npm ci
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-multiple-connect-0.2.5.tgz
+dsh plugin --profile web add ./dsh-multiple-connect-0.2.6.tgz
 ```
 
 重新启动 DSH 后，在「设置 → DSH-MultipleConnect → 通用设置」打开主对话、配置连接模式。若曾安装旧 IM 插件，先在同一 profile 中停用旧插件，避免两个宿主连接同一个机器人。原渠道沿用已有配置及凭据存储，新的连接模式与发送授权独立保存，默认全部外连、禁用工具发送和自动推送。已有 DSH 会话仍可以从原工作区访问。

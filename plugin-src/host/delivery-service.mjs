@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { normalizeDeliveryTarget } from './delivery-adapter.mjs';
+import { deliverySuggestionFromInbox } from './delivery-suggestions.mjs';
 import { COMPETITIVE_APPROVAL_CHANNELS } from '../../src/channels/shared/harness-approval.mjs';
 import { t } from '../../src/channels/shared/i18n.mjs';
 
@@ -133,6 +134,7 @@ function sessionSyncState(value, available) {
 export class DeliveryService {
   #adapters = new Map();
   #unavailableSessionSyncChannels;
+  #inboxConversationSource;
 
   constructor({ unavailableSessionSyncChannels = [] } = {}) {
     if (!Array.isArray(unavailableSessionSyncChannels)
@@ -154,6 +156,13 @@ export class DeliveryService {
       this.#adapters.delete(adapter.channel);
       registration.controller.abort(deliveryError('provider-unavailable'));
       return true;
+    };
+  }
+
+  setInboxConversationSource(source) {
+    this.#inboxConversationSource = source;
+    return () => {
+      if (this.#inboxConversationSource === source) this.#inboxConversationSource = undefined;
     };
   }
 
@@ -197,15 +206,24 @@ export class DeliveryService {
     try {
       const suggestions = await adapter.listSuggestions(id);
       if (!Array.isArray(suggestions)) throw new TypeError('Adapter returned invalid suggestions');
-      return {
-        botId: id,
-        channel: adapter.channel,
-        suggestions: suggestions.map((suggestion) => normalizeDeliveryTarget(
-          adapter.channel,
-          suggestion,
-          { targetIdRequired: false },
-        )),
-      };
+      const { channel } = adapter;
+      const combined = new Map();
+      function include(suggestion) {
+        const target = normalizeDeliveryTarget(channel, suggestion, { targetIdRequired: false });
+        combined.set(JSON.stringify(target), target);
+      }
+      for (const suggestion of suggestions) include(suggestion);
+      if (channel !== 'snowluma' && channel !== 'email') {
+        for (const chat of this.#inboxConversationSource?.(id) ?? []) {
+          const suggestion = deliverySuggestionFromInbox(channel, chat);
+          if (!suggestion) continue;
+          try { include(suggestion); }
+          catch (error) {
+            if (error.code !== 'invalid-target') throw error;
+          }
+        }
+      }
+      return { botId: id, channel, suggestions: [...combined.values()] };
     } catch (error) {
       throw publicOperationError(error);
     }

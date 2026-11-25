@@ -204,6 +204,12 @@ export function createMultipleConnect(ctx, config, deliveryService, {
   store ??= new ConnectStore(database);
   const storage = new InboxStorage(home, store, layout);
   const providers = new Map();
+  const unbindDeliverySuggestions = deliveryService.setInboxConversationSource?.(function* (botId) {
+    const provider = providers.get(botId);
+    for (const chat of store.deliveryConversations(botId)) {
+      if (!provider?.authorize || provider.authorize(chat.conversationId)) yield chat;
+    }
+  });
   const recentPreviews = new Map();
   let previewCount = 0;
   const main = new MainConversation(store, host);
@@ -310,6 +316,7 @@ export function createMultipleConnect(ctx, config, deliveryService, {
     },
     async close() {
       stopped = true;
+      unbindDeliverySuggestions?.();
       clearInterval(timer);
       unwatch?.();
       await pending;

@@ -130,6 +130,30 @@ export function deliverySuggestionFromConversationKey(channel, key) {
   }
 }
 
+/** Convert an accepted inbox conversation, whose IDs can differ from legacy session keys. */
+export function deliverySuggestionFromInbox(channel, { conversationId, kind }) {
+  if (typeof conversationId !== 'string' || !conversationId || conversationId.length > 1024) return null;
+  switch (channel) {
+    case 'feishu':
+      // Proactive Feishu targets address the chat. Topic suffixes only scope replies and history.
+      return deliverySuggestionFromConversationKey(channel, conversationId.replace(/:(?:thread|managed):[^:\s]+$/u, ''));
+    case 'weixin':
+    case 'wecom-app':
+      return kind === 'direct' ? deliverySuggestionFromConversationKey(channel, `p2p:${conversationId}`) : null;
+    case 'slack':
+    case 'telegram':
+    case 'discord':
+    case 'whatsapp':
+      return ['direct', 'group'].includes(kind)
+        ? deliverySuggestionFromConversationKey(channel, `${kind}:${conversationId}`) : null;
+    case 'imessage':
+      return kind === 'direct' && !/[\s\u0000-\u001f\u007f]/u.test(conversationId)
+        ? { kind: 'user', route: { chatGuid: conversationId } } : null;
+    default:
+      return deliverySuggestionFromConversationKey(channel, conversationId);
+  }
+}
+
 /** Convert only a persisted private-chat key into its stable delivery route. */
 export function privateDeliverySuggestionFromConversationKey(channel, key) {
   if (channel === 'matrix' && typeof key === 'string') key = key.replace(/^direct:dm:/, 'dm:');

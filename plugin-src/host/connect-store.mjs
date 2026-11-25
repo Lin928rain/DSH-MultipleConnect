@@ -326,6 +326,11 @@ export class ConnectStore {
       .all(botId, chatId, chatId, chatId, chatId, before, limit);
   }
 
+  deliveryConversations(botId) {
+    return this.db.prepare(`SELECT conversation_id AS conversationId, kind
+      FROM messages WHERE bot_id = ? GROUP BY conversation_id ORDER BY max(id) DESC`).iterate(botId);
+  }
+
   readMessages(botId, conversationId, before, limit) {
     return this.db.prepare(`SELECT id AS cursor, message_id AS messageId,
         sender_id AS senderId, text, attachments, received_at AS receivedAt, details

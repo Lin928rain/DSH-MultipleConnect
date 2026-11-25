@@ -12,6 +12,8 @@ import { createDshMainHost, createMultipleConnect, installConnectRpc, MainConver
 import { MultipleConnectSettings, SnowlumaSettings } from '../plugin-src/client/multiple-connect-settings.js';
 import { WorkspaceDirectoryPickerContext } from '../plugin-src/client/workspace-editor.js';
 import { createDeliveryService } from '../plugin-src/host/delivery-service.mjs';
+import { createDeliveryAdapter } from '../plugin-src/host/delivery-adapter.mjs';
+import { createDeliveryRpcHandler } from '../plugin-src/host/delivery-rpc.mjs';
 import { askInWorkspaceSession } from '../src/channels/shared/workspace-session.mjs';
 import { captureExternal } from '../src/channels/shared/multiple-connect.mjs';
 import { createImSendToolDefinition } from '../src/channels/shared/im-send-tool.mjs';
@@ -101,6 +103,43 @@ test('chat overrides and inherited notification cycles are isolated by chat and 
     assert.equal(store.nextNotification(), undefined);
     assert.equal(store.receive('bot', inbound(6, 'alpha')), 'internal');
   } finally { store.close(); }
+});
+
+test('the delivery picker includes bot-local inbox chats without independent DSH sessions', async () => {
+  const store = new ConnectStore(':memory:');
+  const { host } = hostFixture();
+  const service = createDeliveryService();
+  const runtime = createMultipleConnect({}, {}, service, { store, host });
+  const options = (botIds, sessions) => ({
+    workspaces: { has: (id) => botIds.includes(id), listBotIds: () => botIds, listDeliveryTargets: () => [] },
+    coreController: {},
+    stateFor: () => ({ snapshot: () => ({ sessions }) }),
+  });
+  service.registerAdapter(createDeliveryAdapter({ channel: 'feishu', ...options(['lark', 'other_lark'], {}) }));
+  service.registerAdapter(createDeliveryAdapter({ channel: 'telegram', ...options(['tg'], { 'group:-100:42': 'old-session' }) }));
+  const rpc = createDeliveryRpcHandler(service);
+  try {
+    store.configure('lark', configured({ mode: 'internal' }));
+    runtime.connection('lark').receive({ ...sample(1), conversationId: 'p2p:ou_self' });
+    runtime.connection('lark').receive({ ...sample(2), conversationId: 'group:oc_team:thread:omt_thread', kind: 'group' });
+    runtime.connection('lark').receive({ ...sample(3), conversationId: 'group:oc_team:managed:om_root', kind: 'group' });
+    runtime.connection('other_lark').receive({ ...sample(1), conversationId: 'p2p:ou_other' });
+    runtime.connection('tg').receive({ ...sample(1), conversationId: '-100:42', kind: 'group' });
+    runtime.connection('tg').receive({ ...sample(2), conversationId: '781', kind: 'direct' });
+
+    const result = await rpc('target.suggestion.list', { botId: 'lark' });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.value.suggestions, [
+      { kind: 'group', route: { chatId: 'oc_team' } },
+      { kind: 'user', route: { openId: 'ou_self' } },
+    ]);
+    assert.deepEqual((await service.listSuggestions('tg')).suggestions, [
+      { kind: 'topic', route: { chatId: '-100', messageThreadId: 42 } },
+      { kind: 'chat', route: { chatId: '781' } },
+    ]);
+    assert.deepEqual((await service.listTargets('lark')).targets, []);
+    await assert.rejects(service.send('lark', 'ou_self', 'hello'), { code: 'unknown-target' });
+  } finally { await runtime.close(); }
 });
 
 test('legacy chats are discovered at upgrade and Telegram topics inherit the group configuration', async (t) => {
