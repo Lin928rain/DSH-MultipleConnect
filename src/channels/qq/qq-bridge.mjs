@@ -599,7 +599,7 @@ export class QqHarnessBridge {
           ? { allowed: true, reason: 'legacy-owner' }
           : { allowed: false, reason: 'sender-not-allowed' };
       if (!access.allowed) {
-        if (!addressed || this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
+        if (!addressed || this.#harness?.multipleConnect?.mode(key) === 'external') return Promise.resolve();
         this.#acceptedMessageIds.set(messageId, null);
         return this.#finishAccessDecision(message, messageId, access);
       }

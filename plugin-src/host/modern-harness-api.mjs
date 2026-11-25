@@ -203,10 +203,28 @@ class ModernHarnessApi {
   #mux = new Set();
   #pendingQuestions = new Map();
   #pendingApprovals = new Map();
+  #interactionCounts = new Map();
   #sessionCursors = new Map();
   #assistantStreams = new Map();
   #disposers = [];
   #disposed = false;
+
+  hasPendingInteraction(sessionId) {
+    return this.#interactionCounts.has(sessionId);
+  }
+
+  async #trackInteraction(request, run) {
+    const sessionId = request?.agent?.session?.id ?? request?.agent?.id;
+    if (typeof sessionId !== 'string') return run();
+    this.#interactionCounts.set(sessionId, (this.#interactionCounts.get(sessionId) ?? 0) + 1);
+    try {
+      return await run();
+    } finally {
+      const remaining = this.#interactionCounts.get(sessionId) - 1;
+      if (remaining) this.#interactionCounts.set(sessionId, remaining);
+      else this.#interactionCounts.delete(sessionId);
+    }
+  }
 
   constructor(ctx, gateway, scope) {
     this.#gateway = gateway;
@@ -279,12 +297,12 @@ class ModernHarnessApi {
       }, { global: true }));
       this.#disposers.push(ctx.on(
         'approval/request',
-        (request, next) => this.#requestApproval(request, next),
+        (request, next) => this.#trackInteraction(request, () => this.#requestApproval(request, next)),
         { global: true, prepend: true },
       ));
       this.#disposers.push(ctx.on(
         'user-questions/request',
-        (request, next) => this.#requestQuestion(request, next),
+        (request, next) => this.#trackInteraction(request, () => this.#requestQuestion(request, next)),
         { global: true, prepend: true },
       ));
     }

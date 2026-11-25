@@ -1,4 +1,4 @@
-import { CONNECT_RPC, MultipleConnectSettings, SnowlumaSettings } from './multiple-connect-settings.js';
+import { ChannelRoutingSettings, CONNECT_RPC, MultipleConnectSettings, SnowlumaSettings } from './multiple-connect-settings.js';
 import { callManagementRpc } from '../management-rpc.mjs';
 import * as React from 'react';
 import manifest from '../../package.json' with { type: 'json' };
@@ -396,7 +396,8 @@ export function IMSettingsTab({
               accessRpcCall: rpcCalls[`${active.id}RpcCall`],
               onBack: () => setDeliverySettings(null),
             })
-          : active.id === 'snowluma'
+          : h(React.Fragment, null,
+          active.id === 'snowluma'
             ? h(SnowlumaSettings, { rpc: connectRpcCall, openDelivery: setDeliverySettings })
           : active.id === 'weixin'
             ? h(WeixinSettingsTab, { rpcCall: rpcCalls.weixinRpcCall })
@@ -424,7 +425,9 @@ export function IMSettingsTab({
                             ? h(EmailSettingsTab, { rpcCall: rpcCalls.emailRpcCall })
                           : active.id === 'matrix'
                             ? h(MatrixSettingsTab, { rpcCall: rpcCalls.matrixRpcCall })
-                          : h(OfficeSettingsTab, { rpcCall: rpcCalls.officeRpcCall }))),
+                          : h(OfficeSettingsTab, { rpcCall: rpcCalls.officeRpcCall }),
+          active.id !== 'office' && h(ChannelRoutingSettings, { key: active.id,
+            channel: active.id === 'wecomApp' ? 'wecom-app' : active.id, rpc: connectRpcCall })))),
     ),
   ));
 }

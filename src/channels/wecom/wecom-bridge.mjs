@@ -927,7 +927,7 @@ export class WecomHarnessBridge {
         ? { isCommand: true } : {}),
     });
     if (!access.allowed) {
-      if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
+      if (this.#harness?.multipleConnect?.mode(key) === 'external') return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(frame, messageId, chatId, access);
     }

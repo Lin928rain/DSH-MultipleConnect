@@ -286,7 +286,7 @@ export class WecomAppBridge {
       hasFiles: false,
     });
     if (!access.allowed) {
-      if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
+      if (this.#harness?.multipleConnect?.mode(sender) === 'external') return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(messageId, sender, access);
     }
@@ -640,6 +640,7 @@ export class WecomAppBridge {
         promptRecorded = true;
         ({ answer, artifacts = [] } = await askInWorkspaceSession({
           deferredDelivery: () => ({ coordinator: this.#deferred, target: { toUserId: sender } }),
+          routingChatId: sender,
           harness: this.#harness,
           state: this.#state,
           key,

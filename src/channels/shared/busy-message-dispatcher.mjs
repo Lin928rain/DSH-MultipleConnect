@@ -23,7 +23,7 @@ export class BusyMessageDispatcher {
     key, messageId, text, commandText = text, eligible, harness, state, status,
     control, signal, enhancement, pendingInteraction, acceptedMessageIds,
     mode = harness.currentBusyMessageMode?.(), onFailure, abortPreAsk,
-    enqueue, isQueued, send, logger = console, onSteered, onError,
+    enqueue, isQueued, send, logger = console, onSteered, onError, quietQueue = false,
   }) {
     // Read once, before any await: a settings change cannot reinterpret this input.
     const resolved = normalizeBusyMessageMode(mode);
@@ -46,7 +46,7 @@ export class BusyMessageDispatcher {
       const waiting = isQueued();
       // Reserve FIFO position before sending the optional receipt.
       const completion = enqueue({ alreadyRecorded });
-      const receipt = waiting && !quiet
+      const receipt = waiting && !quiet && !quietQueue
         ? Promise.resolve().then(() => send(t('已排队，等待前序消息处理。'))).catch((error) => {
             logger.warn?.('[dsh-im] failed to send queue receipt:', error);
           })

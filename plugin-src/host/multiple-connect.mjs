@@ -228,8 +228,12 @@ export function createMultipleConnect(ctx, config, deliveryService, {
           ?? (bot ? `${bot.channel} · ${bot.botId}` : notice.botId);
         if (stopped) break;
         if (store.nextNotification()?.id !== notice.id) continue;
+        const origin = notice.chatId ? ' · ' + JSON.stringify({
+          botId: notice.botId, conversationId: notice.conversationId,
+          ...(notice.chatId !== notice.conversationId ? { chatId: notice.chatId } : {}),
+        }) : '';
         await host.notify(entry, `multiple-connect-${instanceId}-${notice.id}`,
-          `[DSH-MultipleConnect] ${name} 收到 ${notice.count} 条新消息。`);
+          `[DSH-MultipleConnect] ${name}${origin} 收到 ${notice.count} 条新消息。`);
         store.finishNotification(notice.id);
       }
     })().catch((error) => logger.warn?.('[dsh-multiple-connect] main or notification pending:', error?.message ?? error))
@@ -249,13 +253,27 @@ export function createMultipleConnect(ctx, config, deliveryService, {
   const api = {
     main, store, storage, kick,
     provider: (botId) => providers.get(botId),
+    async listChats(botId, { before, query = '', kind = '' }) {
+      const provider = providers.get(botId);
+      const available = await provider?.conversations?.() ?? [];
+      if (available.length) store.transaction(() => {
+        for (const { conversationId, name, kind } of available) {
+          store.rememberChat(botId, { chatId: conversationId, name, kind });
+        }
+      });
+      const rows = store.chats(botId, Number.isSafeInteger(before) && before > 0 ? before : Number.MAX_SAFE_INTEGER,
+        51, typeof query === 'string' ? query.trim().slice(0, 200) : '', ['direct', 'group'].includes(kind) ? kind : '');
+      const hasMore = rows.length > 50;
+      const items = rows.slice(0, 50);
+      return { items, before: hasMore ? items.at(-1).cursor : null };
+    },
     connection(botId, harness) {
       return {
         botId,
         harness,
         main,
         activeTurns: new Map(),
-        mode: () => store.settings(botId).mode,
+        mode: (chatId) => store.chatSettings(botId, chatId).mode,
         recall: ({ messageId, chatId }) => store.recall(botId, messageId, chatId),
         bindInboxProvider(provider) {
           providers.set(botId, provider);
@@ -319,9 +337,16 @@ export function installConnectRpc(ctx, runtime, deliveryService, config, snowlum
       }
       if (endpoint === 'storage.set') return { ok: true, value: await runtime.storage.configure(payload) };
       if (endpoint === 'storage.approve') return { ok: true, value: runtime.storage.approve(payload.id) };
-      if (endpoint === 'connection.set') {
+      if (['connection.set', 'conversation.list', 'conversation.set'].includes(endpoint)) {
         const bots = await deliveryService.listBots();
         if (!bots.some(({ botId }) => botId === payload.botId)) throw new Error('Unknown connection');
+        if (endpoint === 'conversation.list') {
+          return { ok: true, value: await runtime.listChats(payload.botId, payload) };
+        }
+        if (endpoint === 'conversation.set') {
+          if (typeof payload.chatId !== 'string' || !payload.chatId || payload.chatId.length > 1024) throw new Error('Invalid chat');
+          return { ok: true, value: runtime.store.configureChat(payload.botId, payload.chatId, payload.settings) };
+        }
         return { ok: true, value: runtime.store.configure(payload.botId, payload.settings) };
       }
       if (endpoint === 'main.archive') {

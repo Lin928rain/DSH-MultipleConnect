@@ -1193,7 +1193,7 @@ export class FeishuHarnessBridge {
         }),
     });
     if (!access.allowed) {
-      if (this.#harness?.multipleConnect?.mode() === 'external'
+      if (this.#harness?.multipleConnect?.mode(event.message.chat_id ?? key) === 'external'
         || conversationType === 'group' && !addressed && this.#groupResponseMode === FEISHU_GROUP_RESPONSE_MODES.MENTION) return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(event, messageId, access);
@@ -1718,6 +1718,8 @@ export class FeishuHarnessBridge {
     return {
       messageId: event.message.message_id, conversationId, senderId: senderOpenId(event),
       kind: event.message.chat_type === 'p2p' ? 'direct' : 'group',
+      routeId: event.message.chat_id,
+      chatName: event.message.chat_name,
       ...feishuInboxContent(event, this.#client),
     };
   }
@@ -5578,6 +5580,7 @@ export class FeishuHarnessBridge {
     try {
       completed = await askInWorkspaceSession({
       deferredDelivery: () => ({ coordinator: this.#deferred, chatId, replyToMessageId: messageId }),
+      routingChatId: chatId,
       harness: this.#harness,
       state: this.#state,
       key,
@@ -5883,6 +5886,7 @@ export class FeishuHarnessBridge {
           : null;
         const { sessionId, answer, artifacts = [] } = await askInWorkspaceSession({
           deferredDelivery: () => ({ coordinator: this.#deferred, chatId, replyToMessageId: messageId }),
+          routingChatId: chatId,
           harness: this.#harness,
           state: this.#state,
           key,
@@ -5993,6 +5997,7 @@ export class FeishuHarnessBridge {
             };
             const completed = await askInWorkspaceSession({
               deferredDelivery: () => ({ coordinator: this.#deferred, chatId, replyToMessageId: messageId }),
+              routingChatId: chatId,
               harness: this.#harness,
               state: this.#state,
               key,
@@ -6079,6 +6084,7 @@ export class FeishuHarnessBridge {
         this.#logger.warn?.('[dsh-feishu] native stream unavailable; using text fallback:', error.message);
         const { sessionId, answer, artifacts = [] } = await askInWorkspaceSession({
           deferredDelivery: () => ({ coordinator: this.#deferred, chatId, replyToMessageId: messageId }),
+          routingChatId: chatId,
           harness: this.#harness,
           state: this.#state,
           key,

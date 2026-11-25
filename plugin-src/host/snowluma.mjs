@@ -4,9 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'undici';
 import { HarnessClient } from '../../src/channels/shared/harness-client.mjs';
 import { askInWorkspaceSession } from '../../src/channels/shared/workspace-session.mjs';
+import { BusyMessageDispatcher } from '../../src/channels/shared/busy-message-dispatcher.mjs';
+import { normalizeBusyMessageMode, storedBusyMessageMode, validateBusyMessageMode } from '../../src/channels/shared/message-mode.mjs';
 import { createMessageBreakHandler } from '../../src/channels/shared/message-break.mjs';
 import { splitMessageText } from '../../src/channels/shared/editable-message-stream.mjs';
 import { harnessConnection } from './harness-connection.mjs';
+import { createHarnessSessionExecutors } from './harness-session-coordinator.mjs';
 import { normalizeDeliveryTarget } from './delivery-adapter.mjs';
 import { inboxPrompt } from '../../src/channels/shared/multiple-connect.mjs';
 import { createOneBotInboxProvider, oneBotContent, oneBotSegments, oneBotWireId as wireId } from './onebot-inbox.mjs';
@@ -151,6 +154,8 @@ function validateConfig(value, previous) {
   return {
     botId, name: value.name.trim(), url: url.href, token,
     users: allowList(value.users), groups: allowList(value.groups),
+    busyMessageMode: value.busyMessageMode === undefined ? storedBusyMessageMode(previous?.busyMessageMode)
+      : value.busyMessageMode === null ? undefined : validateBusyMessageMode(value.busyMessageMode),
     accountId: previous?.url === url.href && previous?.token === token ? previous?.accountId : undefined,
   };
 }
@@ -177,22 +182,48 @@ function inlineAttachment(file) {
   return 'base64://' + Buffer.from(file.bytes).toString('base64');
 }
 
-export function createSnowlumaManager({ ctx, config, runtime, deliveryService, logger, Socket }) {
+export function createSnowlumaManager({ ctx, config, runtime, deliveryService, logger, Socket, Harness = HarnessClient }) {
   const entries = new Map();
   const closeSignal = new AbortController();
   const store = runtime.store;
   const stored = () => store.getState('snowluma.connections') ?? [];
   const saved = (botId) => store.getState(`snowluma.targets:${botId}`) ?? [];
   const persist = (botId, targets) => store.setState(`snowluma.targets:${botId}`, targets);
-  let harness;
-  const getHarness = () => (harness ??= new HarnessClient(harnessConnection(ctx, config)));
+  let harness, transport;
+  function getHarness() {
+    if (harness) return harness;
+    transport = harnessConnection(ctx, { ...config, multipleConnectRuntime: runtime });
+    const { controlExecutor } = createHarnessSessionExecutors(ctx);
+    harness = new Harness({
+      ...transport,
+      // Only the same-process executor can verify the exact prompt and pending interaction.
+      controlExecutor: (request) => !transport.apiProxy.hasPendingInteraction(request.sessionId)
+        && controlExecutor?.(request) === true,
+    });
+    return harness;
+  }
   const sending = new Set();
-  const seen = new Map();
 
   function mount(account) {
-    entries.get(account.botId)?.socket.close();
     const bridge = runtime.connection(account.botId, { ask: (...args) => getHarness().ask(...args) });
     const controller = new AbortController();
+    const dispatcher = new BusyMessageDispatcher();
+    const owner = {};
+    const status = {};
+    const acceptedMessageIds = new Set();
+    const report = (error) => {
+      if (!controller.signal.aborted && error?.code !== 'turn-stopped') {
+        logger.warn?.('[dsh-multiple-connect] Snowluma inbound:', error?.code ?? error?.message);
+      }
+    };
+    const sessionFor = (key) => bridge.activeTurns.get(key);
+    const state = { sessionFor, hasSeen: () => false, markSeen: () => undefined };
+    const controls = {
+      workspaceSession: (sessionId) => ({
+        steerActiveTurn: (...args) => getHarness().steerActiveTurn(sessionId, ...args),
+        stopActiveTurn: (...args) => getHarness().stopActiveTurn(sessionId, ...args),
+      }),
+    };
     const rememberAccount = (accountId) => {
       if (!accountId || account.accountId || controller.signal.aborted) return;
       account.accountId = accountId;
@@ -204,12 +235,12 @@ export function createSnowlumaManager({ ctx, config, runtime, deliveryService, l
       if (!message) return;
       rememberAccount(message.selfId);
       if (bridge.receive(message) !== 'internal' || !message.addressed || !message.text) return;
-      const key = `${account.botId}:${message.conversationId}:${message.messageId}`;
-      if (seen.has(key)) return;
-      seen.set(key, true);
-      if (seen.size > 2048) seen.delete(seen.keys().next().value);
+      const key = message.conversationId;
+      const messageId = JSON.stringify([key, message.messageId]);
       const signal = AbortSignal.any([closeSignal.signal, controller.signal]);
       const kind = message.kind === 'group' ? 'group' : 'user';
+      const control = { owner, key };
+      const text = `[Snowluma · ${kind} ${message.chatId} · sender ${message.senderId}]\n${message.text}\n${inboxPrompt(message, account.botId)}`;
       const send = async (body, replyId) => {
         for (const text of splitMessageText(body, 1800)) {
           await transmit(socket, kind, message.chatId, text, { signal, replyId });
@@ -221,11 +252,13 @@ export function createSnowlumaManager({ ctx, config, runtime, deliveryService, l
         sendSegment: (text) => send(text, sentSegments++ === 0 ? message.messageId : undefined),
         logger,
       });
-      const task = askInWorkspaceSession({
+      const enqueue = () => askInWorkspaceSession({
         harness: { multipleConnect: bridge },
-        text: `[Snowluma · ${kind} ${message.chatId} · sender ${message.senderId}]\n${message.text}\n${inboxPrompt(message, account.botId)}`,
+        key,
+        text,
         askOptions: {
           signal,
+          control,
           progressMode: 'all',
           onUpdate: (update) => breaks.handleUpdate(update),
         },
@@ -247,10 +280,18 @@ export function createSnowlumaManager({ ctx, config, runtime, deliveryService, l
           }, signal),
           sendFailureNotice: () => send('Unable to deliver an attachment.'),
         });
+      }).catch(report);
+      const task = dispatcher.dispatch({
+        key, messageId, text, commandText: message.text, eligible: true,
+        mode: account.busyMessageMode ?? normalizeBusyMessageMode(config.humanizeDefaults?.('snowluma')?.busyMessageMode),
+        harness: controls, state, status, control, signal, acceptedMessageIds, enqueue, send, logger,
+        isQueued: () => Boolean(sessionFor(key)),
+        pendingInteraction: () => transport?.apiProxy.hasPendingInteraction(sessionFor(key)) ?? false,
+        quietQueue: true, onError: report,
       });
       sending.add(task);
       try { await task; } finally { sending.delete(task); }
-    }, { Socket, onError: (error) => logger.warn?.('[dsh-multiple-connect] Snowluma inbound:', error?.code ?? error?.message),
+    }, { Socket, onError: report,
       async onOpen() {
         if (account.accountId) return;
         const identity = await socket.request('get_login_info', {}, controller.signal);
@@ -318,6 +359,12 @@ export function createSnowlumaManager({ ctx, config, runtime, deliveryService, l
       if (value.botId && !existing) throw failure('unknown-bot');
       const next = validateConfig(value, existing);
       store.setState('snowluma.connections', [...stored().filter((item) => item.botId !== next.botId), next]);
+      if (existing && existing.url === next.url && existing.token === next.token
+        && existing.users.length === next.users.length && existing.users.every((id) => next.users.includes(id))
+        && existing.groups.length === next.groups.length && existing.groups.every((id) => next.groups.includes(id))) {
+        Object.assign(existing, next);
+        return { botId: next.botId };
+      }
       unmount(next.botId);
       mount(next);
       return { botId: next.botId };

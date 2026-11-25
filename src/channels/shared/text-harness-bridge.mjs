@@ -300,7 +300,7 @@ export class TextHarnessBridge {
         hasFiles,
       });
       if (!decision.allowed) {
-        if (this.#harness?.multipleConnect?.mode() === 'external' || kind === 'group' && !normalized.addressed) return Promise.resolve();
+        if (this.#harness?.multipleConnect?.mode(conversationId) === 'external' || kind === 'group' && !normalized.addressed) return Promise.resolve();
         this.#status.messagesRejected += 1;
         this.#status.lastRejectedAt = new Date().toISOString();
         // Mark policy denials so a webhook replay cannot repeat local work or
@@ -316,8 +316,10 @@ export class TextHarnessBridge {
         );
       }
     }
+    const source = this.#harness?.multipleConnect ? normalized.contextSource?.() : undefined;
     const inboxRecord = {
       messageId, conversationId, senderId, kind, text: normalized.text ?? normalized.content,
+      chatName: source?.conversationTitle ?? (kind === 'direct' ? source?.senderName : undefined),
       replyTo: normalized.replyTo,
       attachments: [...(normalized.images ?? []).map((item) => ({ ...item, type: 'image' })), ...(normalized.files ?? [])],
       ...normalized.inbox,
@@ -1146,6 +1148,7 @@ export class TextHarnessBridge {
         harness: this.#harness,
         state: this.#state,
         key: conversationKey,
+        routingChatId: message.conversationId ?? conversationKey.slice(conversationKey.indexOf(':') + 1),
         text,
         content,
         titleText: batchSubmission?.title,

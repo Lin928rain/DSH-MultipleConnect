@@ -722,6 +722,11 @@ const CSS = String.raw`
 .dim-connectButton, .dim-connectActions > .dim-deliveryButton { min-height: 34px; }
 .dim-connectButton[data-kind="primary"]:hover:not(:disabled) { border-color: color-mix(in srgb, var(--dim-blue) 88%, #000); background: color-mix(in srgb, var(--dim-blue) 88%, #000); }
 .dim-connectHint, .dim-connectSuccess, .dim-connectAlert { margin: 0; color: var(--dsw-alias-label-secondary, #646a73); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.dim-connectChats { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dsw-alias-line, #dedfe3); }
+.dim-connectChatMeta { margin-top: 4px; }
+.dim-connectChats .dim-connectFieldHead { flex-wrap: wrap; }
+.dim-connectChannel > summary { cursor: pointer; font-weight: 600; }
+.dim-connectChannel[open] > summary { margin-bottom: 12px; }
 .dim-connectAlert { padding: 8px 10px; border-radius: 8px; color: var(--dsw-alias-state-error-primary, #d54941); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d54941) 8%, transparent); }
 .dim-connectSuccess { color: var(--dsw-alias-state-success-primary, #20a162); }
 .dim-storageCard { margin-top: 12px; }

@@ -116,7 +116,7 @@ export const HUMANIZE_FIELDS = Object.freeze([
     // bot states it once and this section cannot shadow it.
     perBot: false,
     label: '消息处理方式（全局默认）',
-    hint: '支持此项的机器人可在「通用设置」中覆盖。等待交互时，普通消息排队。Snowluma 内连目前固定排队。',
+    hint: '各机器人可在自己的设置中覆盖。等待交互时，普通消息排队。',
   },
   {
     key: 'typingIndicator',

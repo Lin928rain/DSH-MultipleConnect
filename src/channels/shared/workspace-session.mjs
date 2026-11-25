@@ -1,6 +1,7 @@
 import { releaseOutboundArtifact } from './semantic/artifact.mjs';
 import { withSessionBindingLock } from './session-binding-lock.mjs';
 import { initialSessionTitle } from './session-title.mjs';
+import { SUPERSEDED_STOP_REASON } from './message-mode.mjs';
 
 export const WORKSPACE_SESSION_STALE = 'workspace-session-stale';
 
@@ -93,6 +94,7 @@ export async function askInWorkspaceSession({
   harness,
   state,
   key,
+  routingChatId = key,
   text,
   content,
   prepareContent,
@@ -108,10 +110,18 @@ export async function askInWorkspaceSession({
   if (connection) {
     const options = typeof askOptions === 'number' ? { timeoutMs: askOptions } : { ...askOptions };
     const isCurrent = (sessionId) => connection.main.current()?.sessionId === sessionId;
+    const checkRoute = () => {
+      if (routingChatId && connection.mode?.(routingChatId) === 'external') {
+        throw Object.assign(new Error('The message remains in the external inbox.'), {
+          code: 'turn-stopped', stopReason: SUPERSEDED_STOP_REASON,
+        });
+      }
+    };
     const turn = ({ sessionId }) => submit(sessionId);
     async function submit(sessionId) {
       const discarded = { sessionId, answer: '', artifacts: [] };
       if (!isCurrent(sessionId)) return undefined;
+      checkRoute();
       const artifacts = [];
       const protect = (handler) => handler && ((...args) => {
         if (isCurrent(sessionId)) return handler(...args);
@@ -124,6 +134,7 @@ export async function askInWorkspaceSession({
         ? [...(Array.isArray(message) ? message : [{ type: 'text', text: message }]), origin]
         : message;
       if (!isCurrent(sessionId)) return undefined;
+      checkRoute();
 
       if (key) connection.activeTurns?.set(key, sessionId);
       try {

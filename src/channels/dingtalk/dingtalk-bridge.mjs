@@ -656,7 +656,7 @@ export class DingtalkHarnessBridge {
     const commandText = nonEmptyString(promptMessage.content) ?? '';
     const addressed = String(message.conversationType) !== '2' || message?.isInAtList === true;
     const direct = String(message.conversationType) !== '2';
-    if (addressed || this.#harness?.multipleConnect?.mode() === 'external') {
+    if (addressed || this.#harness?.multipleConnect?.mode(key) === 'external') {
       const access = evaluateInboundAccess(this.#accessPolicy, {
         conversationType,
         senderIds: sender,
@@ -666,7 +666,7 @@ export class DingtalkHarnessBridge {
         ...(isDingtalkMenuCommand(commandText) ? { isCommand: true } : {}),
       });
       if (!access.allowed) {
-        if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
+        if (this.#harness?.multipleConnect?.mode(key) === 'external') return Promise.resolve();
         this.#acceptedMessageIds.set(messageId, null);
         return this.#finishAccessDecision(message, messageId, sessionWebhook, access);
       }
@@ -930,7 +930,7 @@ export class DingtalkHarnessBridge {
     if (!entry || entry.busy || entry.expiresAt <= Date.now()
       || callback?.userId !== senderStaffId(entry.message)) return Promise.resolve();
     const command = dingtalkMenuCommand(entry, callback);
-    if (this.#harness?.multipleConnect?.mode() === 'external'
+    if (this.#harness?.multipleConnect?.mode(entry.key) === 'external'
       || isMultipleConnectSessionCommand(this.#harness, command)) return;
     if (!command) return Promise.resolve();
     entry.busy = true;

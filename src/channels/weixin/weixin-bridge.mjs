@@ -438,7 +438,7 @@ export class WeixinHarnessBridge {
         ? { allowed: true, reason: 'legacy-owner' }
         : { allowed: false, reason: 'sender-not-allowed' };
     if (!access.allowed) {
-      if (this.#harness?.multipleConnect?.mode() === 'external') return Promise.resolve();
+      if (this.#harness?.multipleConnect?.mode(sender) === 'external') return Promise.resolve();
       this.#acceptedMessageIds.set(messageId, null);
       return this.#finishAccessDecision(messageId, sender, message, access);
     }
@@ -961,6 +961,7 @@ export class WeixinHarnessBridge {
           : null;
         ({ answer, artifacts = [] } = await askInWorkspaceSession({
           deferredDelivery: () => ({ coordinator: this.#deferred, target: { toUserId: sender } }),
+          routingChatId: sender,
           harness: this.#harness,
           state: this.#state,
           key,

@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import * as React from 'react';
 import TestRenderer from 'react-test-renderer';
 import { ConnectStore, DEFAULT_CONNECTION_SETTINGS } from '../plugin-src/host/connect-store.mjs';
@@ -14,7 +15,7 @@ import { createDeliveryService } from '../plugin-src/host/delivery-service.mjs';
 import { askInWorkspaceSession } from '../src/channels/shared/workspace-session.mjs';
 import { captureExternal } from '../src/channels/shared/multiple-connect.mjs';
 import { createImSendToolDefinition } from '../src/channels/shared/im-send-tool.mjs';
-import { normalizeSnowlumaMessage, SnowlumaSocket } from '../plugin-src/host/snowluma.mjs';
+import { createSnowlumaManager, normalizeSnowlumaMessage, SnowlumaSocket } from '../plugin-src/host/snowluma.mjs';
 import { installInboxTools } from '../plugin-src/host/inbox-tools.mjs';
 import { createOneBotInboxProvider } from '../plugin-src/host/onebot-inbox.mjs';
 import { feishuInboxContent } from '../src/channels/feishu/message-utils.mjs';
@@ -71,6 +72,65 @@ test('external inbox and message threshold survive restart and duplicate deliver
     assert.equal(store.receive('bot', sample(6)), 'internal');
     assert.equal(store.nextNotification(), undefined);
     assert.equal(store.listConversations('bot', Number.MAX_SAFE_INTEGER, 20)[0].messageCount, 7);
+  } finally { store.close(); }
+});
+
+test('chat overrides and inherited notification cycles are isolated by chat and connection', () => {
+  const store = new ConnectStore(':memory:');
+  const inbound = (id, conversationId, extra = {}) => ({ ...sample(id), conversationId, ...extra });
+  try {
+    store.configure('bot', configured({ autoNotify: true, threshold: 2 }));
+    store.configure('other', configured({ mode: 'internal' }));
+    assert.equal(store.receive('bot', inbound(1, 'alpha')), 'external');
+    assert.equal(store.receive('bot', inbound(1, 'beta')), 'external');
+    assert.equal(store.receive('other', inbound(1, 'alpha')), 'internal');
+    assert.equal(store.nextNotification(), undefined);
+    store.configureChat('bot', 'alpha', { mode: 'internal', autoNotify: false, threshold: 1 });
+    assert.equal(store.receive('bot', inbound(1, 'alpha')), 'silent');
+    assert.equal(store.receive('bot', inbound(2, 'alpha')), 'internal');
+    assert.equal(store.receive('bot', inbound(2, 'beta')), 'notify');
+    store.configureChat('bot', 'alpha', { mode: 'external', autoNotify: true, threshold: 3 });
+    assert.equal(store.nextNotification().chatId, 'beta');
+    assert.equal(store.receive('bot', inbound(3, 'alpha')), 'external');
+    store.configure('bot', configured({ mode: 'internal', autoNotify: false }));
+    assert.equal(store.nextNotification(), undefined);
+    assert.equal(store.receive('bot', inbound(1, 'new')), 'internal');
+    assert.equal(store.receive('bot', inbound(4, 'alpha')), 'external');
+    assert.equal(store.receive('bot', inbound(5, 'alpha')), 'notify');
+    store.configureChat('bot', 'alpha', null);
+    assert.equal(store.nextNotification(), undefined);
+    assert.equal(store.receive('bot', inbound(6, 'alpha')), 'internal');
+  } finally { store.close(); }
+});
+
+test('legacy chats are discovered at upgrade and Telegram topics inherit the group configuration', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'multiple-connect-chat-migration-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const database = join(directory, 'connections.sqlite');
+  const topic = { ...sample(1), conversationId: '-100:97', threadId: '97', kind: 'group' };
+  let store = new ConnectStore(database);
+  store.configure('tg', configured({ mode: 'internal' }));
+  store.receive('tg', topic);
+  store.receive('fs', { ...sample(1), conversationId: 'group:oc_test:topic:1', chatId: 'oc_test', kind: 'group' });
+  store.close();
+  const legacy = new DatabaseSync(database);
+  legacy.exec("DROP TABLE chat_routes; DELETE FROM state WHERE key = 'chat_routes_initialized';");
+  legacy.close();
+  store = new ConnectStore(database);
+  try {
+    assert.deepEqual(store.chats('tg', Infinity, 30).map(({ chatId }) => chatId).sort(), ['-100', '-100:97']);
+    assert.equal(store.chats('fs', Infinity, 30)[0].chatId, 'oc_test');
+    assert.equal(store.listConversations('fs', Infinity, 30, 'oc_test')[0].conversationId, 'group:oc_test:topic:1');
+    assert.equal(store.chatSettings('tg', topic.conversationId).mode, 'internal');
+    store.configureChat('tg', '-100', { mode: 'external', autoNotify: true, threshold: 2 });
+    assert.equal(store.receive('tg', { ...topic, messageId: '2', parentRouteId: '-100' }), 'external');
+    assert.equal(store.receive('tg', { ...topic, messageId: '3', parentRouteId: '-100' }), 'notify');
+    assert.equal(store.nextNotification().chatId, topic.conversationId);
+  } finally { store.close(); }
+  store = new ConnectStore(database);
+  try {
+    assert.equal(store.chatSettings('tg', topic.conversationId).mode, 'external');
+    assert.equal(store.nextNotification().count, 2);
   } finally { store.close(); }
 });
 
@@ -269,6 +329,60 @@ test('Snowluma editing preserves the saved token and parses QQ IDs', async (t) =
   assert.equal(changes.length, 1);
 });
 
+test('chat settings list known conversations and can save or clear one override', async (t) => {
+  const { act, create } = TestRenderer;
+  const store = new ConnectStore(':memory:');
+  const updates = [];
+  store.receive('bot', { ...sample(1), chatName: 'Project chat' });
+  async function rpc(method, payload) {
+    if (method === 'status') return { ok: true, value: { bots: [{ botId: 'bot', channel: 'telegram', settings: store.settings('bot') }], workspaces: [], snowluma: [] } };
+    if (method === 'conversation.list') {
+      return { ok: true, value: { items: store.chats(payload.botId, Number.MAX_SAFE_INTEGER, 20, payload.query), before: null } };
+    }
+    updates.push(payload);
+    return { ok: true, value: store.configureChat(payload.botId, payload.chatId, payload.settings) };
+  }
+  let ui;
+  await act(async () => { ui = create(React.createElement(MultipleConnectSettings, { rpc })); });
+  t.after(() => { act(() => ui.unmount()); store.close(); });
+  const click = (name) => act(async () => ui.root.findAllByType('button')
+    .find((item) => item.children.includes(name)).props.onClick());
+  const change = (type, value, match) => act(async () => ui.root.findAllByType(type)
+    .find(match).props.onChange({ target: { value, checked: value } }));
+  const submit = () => act(async () => ui.root.findByType('form').props.onSubmit({ preventDefault() {} }));
+  await click('管理聊天');
+  await change('input', 'Project', (input) => input.props.type === 'search');
+  assert.equal(ui.root.findByType('h5').children[0], 'Project chat');
+  await click('配置');
+  await change('select', 'custom', (select) => select.props.value === 'inherit');
+  await act(async () => ui.root.findByType('form').findAllByType('input')
+    .find((input) => input.props.type === 'checkbox').props.onChange({ target: { checked: true } }));
+  await change('input', '7', (input) => input.props.type === 'number');
+  await submit();
+  assert.deepEqual(updates.at(-1), { botId: 'bot', chatId: 'chat-1', settings: { mode: 'external', autoNotify: true, threshold: 7 } });
+  await click('配置');
+  await change('select', 'inherit', (select) => select.props.value === 'custom');
+  await submit();
+  assert.equal(updates.at(-1).settings, null);
+});
+
+test('a queued internal message stays in the inbox when its chat changes to external', async () => {
+  const store = new ConnectStore(':memory:');
+  const { host } = hostFixture();
+  const runtime = createMultipleConnect({}, {}, { listBots: async () => [] }, { host, store });
+  try {
+    const calls = [];
+    const connection = runtime.connection('bot', { ask: async (...args) => { calls.push(args); return 'ok'; } });
+    store.configure('bot', configured({ mode: 'internal' }));
+    assert.equal(connection.receive(sample(1)), 'internal');
+    const run = askInWorkspaceSession({ harness: { multipleConnect: connection }, key: 'chat-1', text: sample(1).text });
+    store.configureChat('bot', 'chat-1', { mode: 'external', autoNotify: false, threshold: 1 });
+    await assert.rejects(run, { code: 'turn-stopped' });
+    assert.deepEqual(calls, []);
+    assert.equal(store.message('bot', 'chat-1', '1').text, sample(1).text);
+  } finally { await runtime.close(); }
+});
+
 test('two internal chats retain their own delivery and a queued turn follows main archival', async () => {
   const store = new ConnectStore(':memory:');
   const { host, archived } = hostFixture();
@@ -383,6 +497,125 @@ test('Snowluma transport uses authenticated OneBot frames and associates respons
     await Promise.resolve();
     assert.deepEqual(received, [{ post_type: 'message' }]);
   } finally { socket.close(); }
+});
+
+test('Snowluma steers and interrupts only turns started by that exact chat, otherwise queues', async () => {
+  const wires = [];
+  const delivered = [];
+  const starts = [];
+  const steered = [];
+  const store = new ConnectStore(':memory:');
+  const { host } = hostFixture();
+  const deliveryService = createDeliveryService();
+  let current, mode = 'steer';
+  let stops = 0;
+  const agent = {
+    status: 'idle', session: { events: [] },
+    inject: (message) => steered.push(message.content[0].text),
+    cancel: () => {
+      stops += 1;
+      current.reject(Object.assign(new Error('stopped'), { code: 'turn-stopped' }));
+    },
+  };
+  const handlers = new Map();
+  const ctx = {
+    typertGateway: { invoke() {}, stream() {} },
+    get: (key) => key === 'agents' ? { get: () => agent } : undefined,
+    on: (name, listener) => { handlers.set(name, listener); return () => handlers.delete(name); },
+  };
+  class Socket extends EventTarget {
+    readyState = 1;
+    constructor() { super(); wires.push(this); }
+    event(value) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) })); }
+    send(text) {
+      const { action, params, echo } = JSON.parse(text);
+      delivered.push({ action, params });
+      this.event({ echo, status: 'ok', retcode: 0, data: { message_id: 10 } });
+    }
+    close() { this.readyState = 3; this.dispatchEvent(new Event('close')); }
+  }
+  class Harness {
+    constructor({ controlExecutor }) {
+      this.control = controlExecutor;
+    }
+    async ask(sessionId, content, { control, signal }) {
+      const turn = starts.length + 1;
+      const promptRpcId = 'prompt-' + turn;
+      starts.push(content[0].text);
+      agent.status = 'running';
+      agent.session.id = sessionId;
+      agent.session.events = [
+        { type: 'turn/start', data: { turn } },
+        { type: 'user/message', data: { source: { rpcId: promptRpcId } } },
+      ];
+      const entry = { sessionId, control, turn, promptRpcId };
+      current = entry;
+      try {
+        return await new Promise((resolve, reject) => {
+          Object.assign(entry, { resolve, reject });
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      } finally { current = undefined; agent.status = 'idle'; }
+    }
+    route(action, sessionId, control, text) {
+      if (!current || sessionId !== current.sessionId || control.owner !== current.control.owner || control.key !== current.control.key) return false;
+      return this.control({ sessionId, action, text, expectedTurn: current.turn, promptRpcId: current.promptRpcId, inputRpcId: 'steering' });
+    }
+    async steerActiveTurn(sessionId, text, control) { return this.route('steer', sessionId, control, text); }
+    async stopActiveTurn(sessionId, control) { return this.route('stop', sessionId, control); }
+    stopManagedProcess() {}
+  }
+  const runtime = createMultipleConnect({}, {}, deliveryService, { store, host });
+  const manager = createSnowlumaManager({
+    ctx, runtime, deliveryService, config: { humanizeDefaults: () => ({ busyMessageMode: mode }) },
+    logger: { warn: (message, error) => assert.fail(message + ' ' + error) }, Socket, Harness,
+  });
+  try {
+    const config = { name: 'QQ', url: 'ws://127.0.0.1:3001', groups: [], users: ['20', '21'] };
+    const { botId } = manager.configure(config);
+    store.configure(botId, configured({ mode: 'internal' }));
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    async function incoming(messageId, userId, text) {
+      wires[0].event({ post_type: 'message', message_type: 'private', self_id: 10, user_id: userId,
+        message_id: messageId, message: [{ type: 'text', data: { text } }] });
+      await tick();
+    }
+    await incoming(1, 20, 'first');
+    await incoming(2, 20, 'steer me');
+    assert.match(steered[0], /steer me/u);
+    assert.equal(starts.length, 1);
+    mode = 'interrupt';
+    await incoming(3, 21, 'other chat');
+    assert.equal(stops, 0);
+    assert.equal(starts.length, 1);
+    const question = Promise.withResolvers();
+    const interaction = handlers.get('user-questions/request')({ agent }, () => question.promise);
+    await incoming(4, 20, 'wait for approval');
+    assert.equal(stops, 0);
+    question.resolve();
+    await interaction;
+    await incoming(5, 20, 'interrupt me');
+    assert.equal(stops, 1);
+    assert.match(starts[1], /other chat/u);
+    current.resolve('reply to other');
+    await tick();
+    assert.match(starts[2], /wait for approval/u);
+    manager.configure({ ...config, botId, busyMessageMode: 'queue' });
+    assert.equal(wires.length, 1);
+    await incoming(6, 20, 'plain queue');
+    assert.equal(stops, 1);
+    assert.equal(steered.length, 1);
+    current.resolve('reply to waiting chat');
+    await tick();
+    assert.match(starts[3], /interrupt me/u);
+    current.resolve('reply to interrupt');
+    await tick();
+    assert.match(starts[4], /plain queue/u);
+    current.resolve('reply to queued');
+    await tick();
+    assert.ok(delivered.some(({ params }) => params.user_id === 21 && params.message.some(({ data }) => data.text === 'reply to other')));
+    assert.equal(store.readMessages(botId, '10:private:20', Number.MAX_SAFE_INTEGER, 30).length, 5);
+  } finally { await manager.close(); await runtime.close(); }
 });
 
 test('five platform envelopes preserve the same message details in either mode without preloading originals', async () => {

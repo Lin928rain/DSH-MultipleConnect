@@ -1,7 +1,8 @@
 import * as React from 'react';
-import { h, isEnglish } from './i18n.js';
+import { h, isEnglish, localizeText } from './i18n.js';
 import { WorkspaceDirectoryPicker } from './workspace-directory-picker.js';
 import { WorkspaceDirectoryPickerContext } from './workspace-editor.js';
+import { BUSY_MESSAGE_MODES } from '../../src/channels/shared/message-mode.mjs';
 
 export const CONNECT_RPC = '/dsh-multiple-connect';
 
@@ -45,29 +46,181 @@ function useConnections(rpc) {
   return { status, error, save };
 }
 
-function ConnectionSettings({ bot, save }) {
+function routingFields(draft, patch, modeLabel, { disabled = false } = {}) {
+  return [
+    field(modeLabel, h('select', { value: draft.mode, disabled, onChange: (event) => patch('mode', event.target.value) },
+      h('option', { value: 'external' }, label('外连', 'External')),
+      h('option', { value: 'internal' }, label('内连', 'Internal')))),
+    draft.mode === 'external' && field(localizeText('外连自动提醒'),
+      h('input', { type: 'checkbox', checked: draft.autoNotify, disabled, onChange: (event) => patch('autoNotify', event.target.checked) })),
+    draft.mode === 'external' && draft.autoNotify && field(localizeText('每个聊天累计几条时提醒'),
+      h('input', { type: 'number', min: 1, step: 1, value: draft.threshold, disabled, onChange: (event) => patch('threshold', event.target.value) })),
+  ];
+}
+
+function validThreshold(value) {
+  return Number.isSafeInteger(Number(value)) && Number(value) >= 1;
+}
+
+function validRoutingSettings(draft) {
+  return draft.mode === 'internal' || !draft.autoNotify || validThreshold(draft.threshold);
+}
+
+function routingPayload(draft, previous) {
+  return { ...draft, threshold: validThreshold(draft.threshold) ? Number(draft.threshold) : previous.threshold };
+}
+
+function ChatEditor({ chat, save, cancel }) {
+  const [draft, setDraft] = React.useState(chat.settings);
+  const [custom, setCustom] = React.useState(chat.override !== null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const patch = (key, value) => setDraft((before) => ({ ...before, [key]: value }));
+  async function submit(event) {
+    event.preventDefault();
+    if (busy || (custom && !validRoutingSettings(draft))) return;
+    setBusy(true);
+    setError('');
+    try {
+      await save(custom ? routingPayload(draft, chat.settings) : null);
+    } catch (failure) { setError(failure.message ?? String(failure)); }
+    finally { setBusy(false); }
+  }
+  return h('form', { className: 'dim-connectForm', onSubmit: submit, 'aria-busy': busy },
+    field(localizeText('聊天配置'), h('select', {
+      value: custom ? 'custom' : 'inherit', disabled: busy, onChange: (event) => setCustom(event.target.value === 'custom'),
+    },
+    h('option', { value: 'inherit' }, chat.parentId ? localizeText('继承群设置') : localizeText('跟随默认配置')),
+    h('option', { value: 'custom' }, localizeText('单独配置')))),
+    custom && h('div', { className: 'dim-connectGrid' }, ...routingFields(draft, patch, label('连接模式', 'Connection mode'), { disabled: busy })),
+    error && h('p', { role: 'alert', className: 'dim-connectAlert' }, error),
+    h('div', { className: 'dim-connectActions' },
+      button(label('取消', 'Cancel'), cancel, busy),
+      h('button', { type: 'submit', className: 'dim-deliveryButton dim-connectButton', 'data-kind': 'primary',
+        disabled: busy || (custom && !validRoutingSettings(draft)) }, localizeText('保存聊天配置'))));
+}
+
+function ConversationSettings({ botId, rpc, defaults }) {
+  const [query, setQuery] = React.useState('');
+  const [kind, setKind] = React.useState('');
+  const [items, setItems] = React.useState([]);
+  const [before, setBefore] = React.useState(null);
+  const [editing, setEditing] = React.useState(null);
+  const [error, setError] = React.useState('');
+  const [loading, setLoading] = React.useState(true);
+  const [refresh, setRefresh] = React.useState(0);
+  const generation = React.useRef(0);
+  const load = React.useCallback(async (cursor) => {
+    const id = ++generation.current;
+    setLoading(true);
+    setError('');
+    try {
+      const page = await invoke(rpc, 'conversation.list', { botId, query, kind, before: cursor });
+      if (generation.current !== id) return;
+      setItems((old) => cursor ? [...old, ...page.items] : page.items);
+      setBefore(page.before);
+    } catch (failure) {
+      if (generation.current === id) setError(failure.message ?? String(failure));
+    } finally {
+      if (generation.current === id) setLoading(false);
+    }
+  }, [rpc, botId, query, kind]);
+  React.useEffect(() => {
+    setBefore(null);
+    void load();
+    return () => { generation.current += 1; };
+  }, [load, refresh, defaults.mode, defaults.autoNotify, defaults.threshold]);
+  React.useEffect(() => {
+    if (editing || items.length > 50 || loading) return undefined;
+    const timer = setInterval(() => void load(), 10_000);
+    return () => clearInterval(timer);
+  }, [editing, items.length, load, loading]);
+  async function save(chatId, settings) {
+    await invoke(rpc, 'conversation.set', { botId, chatId, settings });
+    setEditing(null);
+    setRefresh((previous) => previous + 1);
+  }
+  return h('section', { className: 'dim-connectForm dim-connectChats', 'aria-busy': loading },
+    h('div', { className: 'dim-connectGrid' },
+      settingsField(localizeText('搜索聊天'), h('input', { type: 'search', className: 'dim-connectInput',
+        value: query, placeholder: localizeText('名称或聊天 ID'), onChange: (event) => setQuery(event.target.value) })),
+      field(localizeText('聊天类型'), h('select', { value: kind, onChange: (event) => setKind(event.target.value) },
+        h('option', { value: '' }, localizeText('全部')),
+        h('option', { value: 'group' }, localizeText('群聊和频道')),
+        h('option', { value: 'direct' }, label('私聊', 'Direct chats'))))),
+    h('div', { className: 'dim-connectActions' },
+      button(localizeText('刷新聊天列表'), () => setRefresh((previous) => previous + 1), loading)),
+    error && h('p', { role: 'alert', className: 'dim-connectAlert' }, error),
+    !loading && !error && !items.length && h('p', { className: 'dim-connectHint' },
+      localizeText('没有符合条件的聊天。通过接收规则的新聊天会自动出现在这里。')),
+    items.map((chat) => {
+      const kindLabel = chat.parentId ? label('话题', 'Topic') : chat.kind === 'group' ? label('群聊', 'Group') : label('私聊', 'Direct chat');
+      const mode = chat.settings.mode === 'internal' ? label('内连', 'Internal') : label('外连', 'External');
+      const policy = chat.override ? localizeText('单独配置') : localizeText('继承');
+      const reminder = chat.settings.mode === 'external' && (chat.settings.autoNotify
+        ? localizeText('每 {count} 条提醒').replace('{count}', chat.settings.threshold)
+        : localizeText('提醒关闭'));
+      return h('article', { key: chat.chatId, className: 'dim-globalSection dim-connectCard' },
+        h('div', { className: 'dim-connectFieldHead' },
+          h('div', null,
+            h('h5', { className: 'dim-connectTitle' }, chat.name ?? chat.parentName ?? chat.chatId),
+            h('p', { className: 'dim-connectHint dim-connectChatMeta' }, [kindLabel, chat.chatId, mode, policy, reminder].filter(Boolean).join(' · '))),
+          editing !== chat.chatId && button(localizeText('配置'), () => setEditing(chat.chatId))),
+        editing === chat.chatId && h(ChatEditor, { chat,
+          save: (settings) => save(chat.chatId, settings), cancel: () => setEditing(null),
+        }));
+    }),
+    before && button(localizeText('加载更多聊天'), () => void load(before), loading));
+}
+
+function ConnectionSettings({ bot, save, rpc }) {
   const [draft, setDraft] = React.useState(bot.settings);
   const [busy, setBusy] = React.useState(false);
+  const [showChats, setShowChats] = React.useState(false);
   React.useEffect(() => setDraft(bot.settings), [bot.settings.mode, bot.settings.toolSend, bot.settings.autoNotify, bot.settings.threshold]);
   const patch = (field, value) => setDraft((before) => ({ ...before, [field]: value }));
   const persist = async () => {
     setBusy(true);
-    try { await save('connection.set', { botId: bot.botId, settings: { ...draft, threshold: Number(draft.threshold) } }); }
+    try { await save('connection.set', { botId: bot.botId, settings: routingPayload(draft, bot.settings) }); }
     finally { setBusy(false); }
   };
-  return h('fieldset', { className: 'dim-humanizeField' },
-    h('legend', null, bot.name ?? bot.botId),
+  return h('section', { className: 'dim-globalSection dim-connectCard' },
+    h('h4', { className: 'dim-connectTitle' }, bot.name ?? bot.botId),
     h('small', null, bot.channel),
-    field(label('连接模式', 'Mode'), h('select', { value: draft.mode, onChange: (event) => patch('mode', event.target.value) },
-      h('option', { value: 'external' }, label('外连', 'External')),
-      h('option', { value: 'internal' }, label('内连', 'Internal')))),
-    field(label('允许 Agent 工具发送', 'Allow Agent tool sending'),
-      h('input', { type: 'checkbox', checked: draft.toolSend, onChange: (event) => patch('toolSend', event.target.checked) })),
-    draft.mode === 'external' && field(label('外连自动推送', 'Notify main conversation'),
-      h('input', { type: 'checkbox', checked: draft.autoNotify, onChange: (event) => patch('autoNotify', event.target.checked) })),
-    draft.mode === 'external' && draft.autoNotify && field(label('累计几条时提醒', 'Messages per notification'),
-      h('input', { type: 'number', min: 1, step: 1, value: draft.threshold, onChange: (event) => patch('threshold', event.target.value) })),
-    button(label('保存', 'Save'), () => void persist(), busy || !Number.isSafeInteger(Number(draft.threshold)) || Number(draft.threshold) < 1));
+    h('p', { className: 'dim-connectHint' }, localizeText('新聊天和未单独配置的聊天使用这套默认设置。')),
+    h('div', { className: 'dim-connectGrid' }, ...routingFields(draft, patch, localizeText('默认连接模式')),
+      field(label('允许 Agent 工具发送', 'Allow Agent tool sending'),
+        h('input', { type: 'checkbox', checked: draft.toolSend, onChange: (event) => patch('toolSend', event.target.checked) }))),
+    h('div', { className: 'dim-connectActions' },
+      h('button', { type: 'button', className: 'dim-deliveryButton', 'aria-expanded': showChats,
+        onClick: () => setShowChats((open) => !open) }, showChats ? localizeText('收起聊天') : localizeText('管理聊天')),
+      button(localizeText('保存默认配置'), () => void persist(), busy || !validRoutingSettings(draft))),
+    showChats && h(ConversationSettings, { botId: bot.botId, rpc, defaults: bot.settings }));
+}
+
+function RoutingConnections({ status, save, rpc, channel }) {
+  const bots = (status?.bots ?? []).filter((bot) => !channel || bot.channel === channel);
+  return bots.map((bot) => h(ConnectionSettings, {
+    key: bot.botId, bot: { ...bot, name: status.snowluma.find((item) => item.botId === bot.botId)?.name }, save, rpc,
+  }));
+}
+
+function ChannelRoutingForm({ channel, rpc }) {
+  const { status, error, save } = useConnections(rpc);
+  return h(React.Fragment, null,
+    error && h('p', { role: 'alert', className: 'dim-connectAlert' }, error),
+    status && !status.bots.some((bot) => bot.channel === channel)
+      && h('p', { className: 'dim-connectHint' }, localizeText('添加连接后可配置聊天。')),
+    h(RoutingConnections, { status, save, rpc, channel }));
+}
+
+export function ChannelRoutingSettings({ channel, rpc }) {
+  const [open, setOpen] = React.useState(false);
+  if (!rpc) return null;
+  return h('details', { className: 'dim-globalSection dim-connectCard dim-connectChannel',
+    onToggle: (event) => setOpen(event.currentTarget.open) },
+  h('summary', null, localizeText('聊天与连接模式')),
+  open && h(ChannelRoutingForm, { channel, rpc }));
 }
 
 function formatStorageBytes(bytes) {
@@ -220,15 +373,14 @@ export function MultipleConnectSettings({ rpc, openSession }) {
         button(label('创建主对话', 'Create main conversation'), () => void createMain(false), creatingMain || !workspace)),
     error && h('p', { role: 'alert' }, error),
     status?.storage && h(StorageSettings, { storage: status.storage, save }),
-    status?.bots.map((bot) => h(ConnectionSettings, {
-      key: bot.botId, bot: { ...bot, name: status.snowluma.find((item) => item.botId === bot.botId)?.name }, save,
-    })));
+    h(RoutingConnections, { status, save, rpc }));
 }
 
 function SnowlumaEditor({ initial, save, dismiss }) {
   const [value, setValue] = React.useState(() => ({
     name: initial?.name ?? '', url: initial?.url ?? 'ws://127.0.0.1:3001/',
     token: '', users: initial?.users?.join(', ') ?? '', groups: initial?.groups?.join(', ') ?? '',
+    busyMessageMode: initial?.busyMessageMode ?? '',
   }));
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState('');
@@ -249,8 +401,10 @@ function SnowlumaEditor({ initial, save, dismiss }) {
     setError('');
     const ids = (value) => value.split(/[\s,，]+/u).filter(Boolean);
     try {
+      const { busyMessageMode, ...other } = value;
       if (await save('snowluma.set', {
-        ...value, url: value.url.trim(), ...(initial ? { botId: initial.botId } : {}),
+        ...other, url: value.url.trim(), ...(initial ? { botId: initial.botId } : {}),
+        ...(busyMessageMode || initial?.busyMessageMode ? { busyMessageMode: busyMessageMode || null } : {}),
         ...(initial && !value.token ? { token: undefined } : {}),
         users: ids(value.users), groups: ids(value.groups),
       }, setError)) dismiss();
@@ -263,6 +417,14 @@ function SnowlumaEditor({ initial, save, dismiss }) {
         settingsField('连接名称', input('name', { required: true, maxLength: 80, autoFocus: true })),
         settingsField('OneBot WebSocket URL', input('url', { type: 'url', required: true, inputMode: 'url' }))),
       settingsField(initial?.hasToken ? 'Access Token（留空沿用）' : 'Access Token', input('token', { type: 'password' })),
+      field(localizeText('消息处理方式'), h('select', {
+        name: 'busyMessageMode', value: value.busyMessageMode, className: 'dim-connectInput', disabled: busy,
+        onChange: (event) => setValue((previous) => ({ ...previous, busyMessageMode: event.target.value })),
+      },
+        h('option', { value: '' }, localizeText('跟随全局默认')),
+        ...BUSY_MESSAGE_MODES.map((mode) => h('option', { value: mode, key: mode }, {
+          interrupt: localizeText('打断重发'), queue: localizeText('排队等待'), steer: localizeText('注入纠偏'),
+        }[mode])))),
       h('fieldset', { className: 'dim-snowlumaAccess', 'aria-describedby': hintId },
         h('legend', { className: 'dim-connectTitle' }, '接收范围'),
         h('div', { className: 'dim-connectGrid' },

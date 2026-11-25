@@ -386,6 +386,7 @@ export function normalizeTelegramUpdate(update, {
     connectionTestTarget: { chatId, messageThreadId },
     ...(richInbox ? { inbox: {
       ...telegramInboxRecord(message, update),
+      ...(messageThreadId === undefined || direct ? {} : { parentRouteId: String(chatId) }),
       ...(replyTo ? { replyTo: {
         ...replyTo, attachments: telegramInboxRecord(message.reply_to_message ?? message.external_reply ?? {}, {}).attachments,
       } } : {}),

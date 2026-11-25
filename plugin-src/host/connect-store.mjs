@@ -11,17 +11,16 @@ export const DEFAULT_CONNECTION_SETTINGS = Object.freeze({
 });
 
 export function validateConnectionSettings(value) {
-  if (!value || !['internal', 'external'].includes(value.mode)
-    || typeof value.toolSend !== 'boolean' || typeof value.autoNotify !== 'boolean'
+  if (typeof value?.toolSend !== 'boolean') throw new TypeError('Invalid connection settings');
+  return { ...validateChatSettings(value), toolSend: value.toolSend };
+}
+
+function validateChatSettings(value) {
+  if (!value || !['internal', 'external'].includes(value.mode) || typeof value.autoNotify !== 'boolean'
     || !Number.isSafeInteger(value.threshold) || value.threshold < 1) {
     throw new TypeError('Invalid connection settings');
   }
-  return {
-    mode: value.mode,
-    toolSend: value.toolSend,
-    autoNotify: value.autoNotify,
-    threshold: value.threshold,
-  };
+  return { mode: value.mode, autoNotify: value.autoNotify, threshold: value.threshold };
 }
 
 export class ConnectStore {
@@ -51,6 +50,12 @@ export class ConnectStore {
       CREATE TABLE IF NOT EXISTS notifications (
         id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL, count INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS chat_routes (
+        id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+        parent_id TEXT, kind TEXT NOT NULL, name TEXT,
+        override TEXT, pending INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (bot_id, chat_id)
+      );
       PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS inbox_resources (
         message_row INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -72,6 +77,31 @@ export class ConnectStore {
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS inbox_received_at ON messages (received_at)');
     this.db.exec('CREATE INDEX IF NOT EXISTS inbox_native_message ON messages (bot_id, message_id)');
+    this.transaction(() => {
+      if (!this.db.prepare('PRAGMA table_info(notifications)').all().some(({ name }) => name === 'chat_id')) {
+        this.db.exec('ALTER TABLE notifications ADD COLUMN chat_id TEXT');
+      }
+      if (!this.db.prepare('PRAGMA table_info(notifications)').all().some(({ name }) => name === 'conversation_id')) {
+        this.db.exec('ALTER TABLE notifications ADD COLUMN conversation_id TEXT');
+      }
+      this.db.exec('CREATE INDEX IF NOT EXISTS chat_routes_page ON chat_routes (bot_id, id)');
+      if (!this.getState('chat_routes_initialized')) {
+        this.db.exec(`INSERT OR IGNORE INTO chat_routes (bot_id, chat_id, parent_id, kind)
+          SELECT bot_id,
+            CASE WHEN conversation_id GLOB 'group:oc_*' OR conversation_id GLOB 'p2p:*'
+              THEN COALESCE(json_extract(details, '$.chatId'), conversation_id)
+              ELSE conversation_id END AS route,
+            max(CASE WHEN json_extract(details, '$.threadId') IS NOT NULL
+              AND conversation_id GLOB '-[0-9]*:[0-9]*'
+              AND substr(conversation_id, instr(conversation_id, ':') + 1) = json_extract(details, '$.threadId')
+              THEN substr(conversation_id, 1, instr(conversation_id, ':') - 1) END),
+            kind
+          FROM messages GROUP BY bot_id, route;
+          INSERT OR IGNORE INTO chat_routes (bot_id, chat_id, kind)
+            SELECT bot_id, parent_id, 'group' FROM chat_routes WHERE parent_id IS NOT NULL`);
+        this.setState('chat_routes_initialized', true);
+      }
+    });
   }
 
   close() { this.db.close(); }
@@ -131,16 +161,83 @@ export class ConnectStore {
     return result ? JSON.parse(result.value) : DEFAULT_CONNECTION_SETTINGS;
   }
 
+  chatSettings(botId, chatId, defaults = this.settings(botId)) {
+    const row = this.db.prepare(`SELECT chat.override, parent.override AS inherited
+      FROM chat_routes AS chat LEFT JOIN chat_routes AS parent
+        ON parent.bot_id = chat.bot_id AND parent.chat_id = chat.parent_id
+      WHERE chat.bot_id = ? AND chat.chat_id = ?`).get(botId, chatId ?? '');
+    const value = row?.override ?? row?.inherited;
+    return value ? JSON.parse(value) : defaults;
+  }
+
+  rememberChat(botId, { chatId, parentId = null, kind = 'direct', name = null }) {
+    this.db.prepare(`INSERT INTO chat_routes (bot_id, chat_id, parent_id, kind, name) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (bot_id, chat_id) DO UPDATE SET
+        parent_id = COALESCE(excluded.parent_id, parent_id), name = COALESCE(excluded.name, name)
+      WHERE (excluded.parent_id IS NOT NULL AND excluded.parent_id IS NOT parent_id)
+        OR (excluded.name IS NOT NULL AND excluded.name IS NOT name)`)
+      .run(botId, String(chatId), parentId, kind, typeof name === 'string' ? name.trim().slice(0, 256) || null : null);
+  }
+
+  chats(botId, before, limit, search = '', kind = '') {
+    const defaults = this.settings(botId);
+    return this.db.prepare(`SELECT chat.id AS cursor, chat.chat_id AS chatId, chat.parent_id AS parentId,
+        chat.kind, chat.name, chat.override, parent.override AS inherited, parent.name AS parentName
+      FROM chat_routes AS chat LEFT JOIN chat_routes AS parent
+        ON parent.bot_id = chat.bot_id AND parent.chat_id = chat.parent_id
+      WHERE chat.bot_id = ? AND chat.id < ? AND (? = '' OR chat.kind = ?)
+        AND (? = '' OR instr(lower(chat.chat_id), lower(?)) OR instr(lower(COALESCE(chat.name, '')), lower(?))
+          OR instr(lower(COALESCE(parent.name, '')), lower(?)))
+      ORDER BY chat.id DESC LIMIT ?`).all(botId, before, kind, kind, search, search, search, search, limit)
+      .map(({ override, inherited, ...row }) => ({
+        ...row, override: override ? JSON.parse(override) : null,
+        settings: validateChatSettings(override || inherited ? JSON.parse(override ?? inherited) : defaults),
+      }));
+  }
+
+  hasChat(botId, chatId) {
+    return Boolean(this.db.prepare('SELECT 1 FROM chat_routes WHERE bot_id = ? AND chat_id = ?').get(botId, chatId));
+  }
+
+  configureChat(botId, chatId, value) {
+    const override = value === null ? null : JSON.stringify(validateChatSettings(value));
+    return this.transaction(() => {
+      if (!this.hasChat(botId, chatId)) throw new Error('Unknown chat');
+      const chats = this.db.prepare('SELECT chat_id FROM chat_routes WHERE bot_id = ? AND (chat_id = ? OR parent_id = ?)')
+        .all(botId, chatId, chatId);
+      this.updateChatRules(botId, chats, () => this.db.prepare('UPDATE chat_routes SET override = ? WHERE bot_id = ? AND chat_id = ?')
+        .run(override, botId, chatId));
+      return this.chatSettings(botId, chatId);
+    });
+  }
+
+  updateChatRules(botId, chats, apply) {
+    const before = this.settings(botId);
+    const previous = chats.map(({ chat_id }) => validateChatSettings(this.chatSettings(botId, chat_id, before)));
+    apply();
+    const after = this.settings(botId);
+    const reset = this.db.prepare('UPDATE chat_routes SET pending = 0 WHERE bot_id = ? AND chat_id = ?');
+    const clear = this.db.prepare('DELETE FROM notifications WHERE bot_id = ? AND chat_id = ?');
+    for (const [index, { chat_id }] of chats.entries()) {
+      const next = this.chatSettings(botId, chat_id, after);
+      const { mode, autoNotify, threshold } = previous[index];
+      if (mode === next.mode && autoNotify === next.autoNotify && threshold === next.threshold) continue;
+      reset.run(botId, chat_id);
+      clear.run(botId, chat_id);
+    }
+  }
+
   configure(botId, value) {
     const settings = validateConnectionSettings(value);
     return this.transaction(() => {
       const before = this.settings(botId);
-      const reset = before.mode !== settings.mode || before.autoNotify !== settings.autoNotify;
-      this.db.prepare(`INSERT INTO settings VALUES (?, ?, 0)
-        ON CONFLICT (bot_id) DO UPDATE SET value = excluded.value,
-        pending = CASE WHEN ? THEN 0 ELSE pending END`).run(botId, JSON.stringify(settings), Number(reset));
+      const changed = before.mode !== settings.mode || before.autoNotify !== settings.autoNotify
+        || before.threshold !== settings.threshold;
+      const chats = changed ? this.db.prepare('SELECT chat_id FROM chat_routes WHERE bot_id = ? AND override IS NULL').all(botId) : [];
+      this.updateChatRules(botId, chats, () => this.db.prepare(`INSERT INTO settings VALUES (?, ?, 0)
+        ON CONFLICT (bot_id) DO UPDATE SET value = excluded.value`).run(botId, JSON.stringify(settings)));
       if (settings.mode === 'internal' || !settings.autoNotify) {
-        this.db.prepare('DELETE FROM notifications WHERE bot_id = ?').run(botId);
+        this.db.prepare('DELETE FROM notifications WHERE bot_id = ? AND chat_id IS NULL').run(botId);
       }
       return settings;
     });
@@ -160,10 +257,11 @@ export class ConnectStore {
 
   receive(botId, message) {
     return this.transaction(() => {
-      const settings = this.settings(botId);
       const { messageId, conversationId, kind = 'direct', senderId, text = '', attachments = [],
-        receivedAt, updatedAt, deleted, passive, ...details } = message;
-      if (!messageId || !conversationId || !senderId) return settings.mode;
+        receivedAt, updatedAt, deleted, passive, routeId, parentRouteId, chatName, ...details } = message;
+      const chatId = String(routeId ?? conversationId ?? '');
+      if (!messageId || !conversationId || !senderId) return this.chatSettings(botId, chatId).mode;
+      if (chatId !== conversationId) details.routingChatId = chatId;
       const identifiers = [botId, String(conversationId), String(messageId)];
       const recalled = details.chatId && this.db.prepare(`SELECT 1 FROM inbox_recalls
         WHERE bot_id = ? AND chat_id = ? AND message_id = ?`).get(botId, details.chatId, String(messageId));
@@ -190,31 +288,42 @@ export class ConnectStore {
         JSON.stringify(deleted ? { deleted: true } : { ...details, ...(updatedAt ? { updatedAt } : {}) }),
       );
       if (deleted || passive || Number.isSafeInteger(updatedAt)) return 'silent';
+      if (parentRouteId && parentRouteId !== chatId) {
+        this.rememberChat(botId, { chatId: parentRouteId, kind, name: chatName });
+      }
+      this.rememberChat(botId, { chatId, parentId: parentRouteId,
+        kind, name: parentRouteId ? undefined : chatName });
+      const settings = this.chatSettings(botId, chatId);
       if (settings.mode === 'internal') return changes ? 'internal' : 'silent';
       if (!changes || !settings.autoNotify) return 'external';
       const { pending } = this.db.prepare(
-        'UPDATE settings SET pending = pending + 1 WHERE bot_id = ? RETURNING pending',
-      ).get(botId);
+        'UPDATE chat_routes SET pending = pending + 1 WHERE bot_id = ? AND chat_id = ? RETURNING pending',
+      ).get(botId, chatId);
       if (pending < settings.threshold) return 'external';
-      this.db.prepare('INSERT INTO notifications (bot_id, count) VALUES (?, ?)').run(botId, pending);
-      this.db.prepare('UPDATE settings SET pending = 0 WHERE bot_id = ?').run(botId);
+      this.db.prepare('INSERT INTO notifications (bot_id, count, chat_id, conversation_id) VALUES (?, ?, ?, ?)')
+        .run(botId, pending, chatId, String(conversationId));
+      this.db.prepare('UPDATE chat_routes SET pending = 0 WHERE bot_id = ? AND chat_id = ?').run(botId, chatId);
       return 'notify';
     });
   }
 
   nextNotification() {
-    return this.db.prepare('SELECT id, bot_id AS botId, count FROM notifications ORDER BY id LIMIT 1').get();
+    return this.db.prepare(`SELECT id, bot_id AS botId, count, chat_id AS chatId, conversation_id AS conversationId
+      FROM notifications ORDER BY id LIMIT 1`).get();
   }
 
   finishNotification(id) {
     this.db.prepare('DELETE FROM notifications WHERE id = ?').run(id);
   }
 
-  listConversations(botId, before, limit) {
+  listConversations(botId, before, limit, chatId = null) {
     return this.db.prepare(`SELECT conversation_id AS conversationId, kind,
         count(*) AS messageCount, max(id) AS cursor, max(received_at) AS lastReceivedAt
-      FROM messages WHERE bot_id = ? GROUP BY conversation_id
-      HAVING max(id) < ? ORDER BY cursor DESC LIMIT ?`).all(botId, before, limit);
+      FROM messages WHERE bot_id = ? AND (? IS NULL OR conversation_id = ?
+        OR json_extract(details, '$.routingChatId') = ?
+        OR ((conversation_id GLOB 'group:oc_*' OR conversation_id GLOB 'p2p:*') AND json_extract(details, '$.chatId') = ?))
+      GROUP BY conversation_id HAVING max(id) < ? ORDER BY cursor DESC LIMIT ?`)
+      .all(botId, chatId, chatId, chatId, chatId, before, limit);
   }
 
   readMessages(botId, conversationId, before, limit) {

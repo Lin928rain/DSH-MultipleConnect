@@ -53,20 +53,20 @@ export function installInboxTools(ctx, runtime, delivery) {
   }
   ctx.tools.register({
     name: 'list_im_conversations',
-    description: 'List messaging connections or list saved conversations in either connection mode. Use the returned cursor as before to page.',
+    description: 'List messaging connections or list saved conversations in either connection mode. Pass chatId from a notification to find its conversations. Use the returned cursor as before to page.',
     parameters: {
       type: 'object', additionalProperties: false,
-      properties: { botId: string, ...page },
+      properties: { botId: string, chatId: string, ...page },
     },
     output,
     async execute(args) {
       if (args.botId) {
         const provider = runtime.provider(args.botId);
         if (!(await delivery.listBots()).some(({ botId }) => botId === args.botId)) return { items: [] };
-        const items = store.listConversations(args.botId, ...bounds(args))
+        const items = store.listConversations(args.botId, ...bounds(args), args.chatId)
           .filter(({ conversationId }) => !provider?.authorize || provider.authorize(conversationId));
         const ids = new Set(items.map(({ conversationId }) => conversationId));
-        const available = !args.before ? provider?.conversations?.() : [];
+        const available = !args.before && !args.chatId ? provider?.conversations?.() : [];
         return { items, availableConversations: available?.filter(({ conversationId }) => !ids.has(conversationId)) };
       }
       return { items: await Promise.all((await delivery.listBots()).map(async (bot) => ({
