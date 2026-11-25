@@ -1,5 +1,7 @@
 import * as React from 'react';
 import { h, isEnglish } from './i18n.js';
+import { WorkspaceDirectoryPicker } from './workspace-directory-picker.js';
+import { WorkspaceDirectoryPickerContext } from './workspace-editor.js';
 
 export const CONNECT_RPC = '/dsh-multiple-connect';
 
@@ -36,9 +38,9 @@ function useConnections(rpc) {
     const timer = setInterval(() => void refresh(), 10_000);
     return () => clearInterval(timer);
   }, [refresh, rpc]);
-  const save = async (endpoint, value) => {
+  const save = async (endpoint, value, onError = setError) => {
     try { await invoke(rpc, endpoint, value); await refresh(); return true; }
-    catch (failure) { setError(failure.message ?? String(failure)); return false; }
+    catch (failure) { onError(failure.message ?? String(failure)); return false; }
   };
   return { status, error, save };
 }
@@ -73,48 +75,112 @@ function formatStorageBytes(bytes) {
   return bytes < 1024 ** 3 ? (bytes / 1024 ** 2).toFixed(1) + ' MiB' : (bytes / 1024 ** 3).toFixed(2) + ' GiB';
 }
 
+const storageDirectories = [
+  { key: 'messageDirectory', name: '消息库目录（Host 路径）', pickerTitle: '选择消息库目录', usage: 'databaseBytes' },
+  { key: 'attachmentDirectory', name: '附件缓存目录（Host 路径）', pickerTitle: '选择附件缓存目录', usage: 'cacheBytes' },
+];
+const storageLimits = [
+  ['cacheMiB', '附件缓存上限（MiB）', 1],
+  ['downloadMiB', '单附件下载上限（MiB）', 1],
+  ['cacheDays', '附件缓存保留天数', 1],
+  ['historyDays', '消息保留天数（0 为永久）', 0],
+];
+
+function settingsField(title, input, key) {
+  return h('label', { key, className: 'dim-connectField' }, h('span', null, title), input);
+}
+
 function StorageSettings({ storage, save }) {
+  const directoryPicker = React.useContext(WorkspaceDirectoryPickerContext);
+  const titleId = React.useId();
+  const directoryId = React.useId();
+  const trigger = React.useRef(null);
   const { messageDirectory, attachmentDirectory, cacheMiB, downloadMiB, cacheDays, historyDays } = storage;
   const [draft, setDraft] = React.useState({ messageDirectory, attachmentDirectory, cacheMiB, downloadMiB, cacheDays, historyDays });
-  const [busy, setBusy] = React.useState(false);
   React.useEffect(() => setDraft({ messageDirectory, attachmentDirectory, cacheMiB, downloadMiB, cacheDays, historyDays }),
     [messageDirectory, attachmentDirectory, cacheMiB, downloadMiB, cacheDays, historyDays]);
+  const [busy, setBusy] = React.useState(false);
   const [removePrevious, setRemovePrevious] = React.useState(false);
+  const [browse, setBrowse] = React.useState(null);
+  const [feedback, setFeedback] = React.useState(null);
   const moving = draft.messageDirectory !== messageDirectory || draft.attachmentDirectory !== attachmentDirectory;
-  const fields = [
-    ['messageDirectory', label('消息库目录（Host 路径）', 'Message database directory (host path)')],
-    ['attachmentDirectory', label('附件缓存目录（Host 路径）', 'Attachment cache directory (host path)')],
-    ['cacheMiB', label('附件缓存上限（MiB）', 'Attachment cache limit (MiB)'), 1],
-    ['downloadMiB', label('单附件下载上限（MiB）', 'Per-attachment download limit (MiB)'), 1],
-    ['cacheDays', label('附件缓存保留天数', 'Attachment cache retention (days)'), 1],
-    ['historyDays', label('消息保留天数（0 为永久）', 'Message retention (days, 0 keeps all)'), 0],
-  ];
-  const persist = async () => {
+  const changed = moving || storageLimits.some(([key]) => String(draft[key]) !== String(storage[key]));
+  const update = (key, value) => {
+    setDraft((previous) => ({ ...previous, [key]: value }));
+    setFeedback(null);
+  };
+  const updateDirectory = (key, value) => {
+    if (draft[key] === value) return;
+    update(key, value);
+    setRemovePrevious(false);
+  };
+  const closePicker = () => {
+    setBrowse(null);
+    queueMicrotask(() => trigger.current?.focus?.());
+  };
+  const persist = async (event) => {
+    event.preventDefault();
+    if (!changed || busy || browse) return;
     setBusy(true);
+    setFeedback(null);
     try {
-      const settings = Object.fromEntries(fields.map(([key, , minimum]) => [
-        key, minimum === undefined ? draft[key] : Number(draft[key]),
-      ]));
-      if (await save('storage.set', { ...settings, removePrevious: moving && removePrevious })) setRemovePrevious(false);
+      const limits = Object.fromEntries(storageLimits.map(([key]) => [key, Number(draft[key])]));
+      const settings = { messageDirectory: draft.messageDirectory, attachmentDirectory: draft.attachmentDirectory, ...limits };
+      if (await save('storage.set', { ...settings, removePrevious: moving && removePrevious },
+        (message) => setFeedback({ message, error: true }))) {
+        setRemovePrevious(false);
+        setFeedback({ message: '存储设置已保存' });
+      }
     } finally { setBusy(false); }
   };
-  return h('fieldset', { className: 'dim-humanizeField' },
-    h('legend', null, label('消息与附件存储', 'Message and attachment storage')),
-    h('small', null, label('消息库', 'Message database'), ' ', formatStorageBytes(storage.databaseBytes),
-      ' · ', label('附件缓存', 'Attachment cache'), ' ', formatStorageBytes(storage.cacheBytes)),
-    storage.warning && h('p', { role: 'alert' }, storage.warning),
-    fields.map(([key, title, minimum]) => h(React.Fragment, { key },
-      field(title, h('input', {
-        type: minimum === undefined ? 'text' : 'number', min: minimum, step: minimum === undefined ? undefined : 1,
-        value: draft[key], onChange: (event) => setDraft({ ...draft, [key]: event.target.value }),
-      })))),
-    moving && field(label('迁移成功后删除旧副本', 'Delete the previous copy after a successful move'),
-      h('input', { type: 'checkbox', checked: removePrevious, onChange: (event) => setRemovePrevious(event.target.checked) })),
-    button(label('保存存储设置', 'Save storage settings'), () => void persist(), busy),
-    storage.requests?.map(({ id, name, size, approved }) => h('div', { key: id },
-      h('span', null, name || label('附件', 'Attachment'), ' · ', formatStorageBytes(size), ' '),
-      button(approved ? label('已允许本次下载', 'Download approved') : label('允许本次下载', 'Approve this download'),
-        () => void save('storage.approve', { id }), approved))));
+  return h('section', { className: 'dim-globalSection dim-connectCard dim-storageCard', 'aria-labelledby': titleId },
+    h('h4', { className: 'dim-connectTitle', id: titleId }, '消息与附件存储'),
+    storage.warning && h('p', { className: 'dim-connectAlert', role: 'alert' }, storage.warning),
+    h('form', { className: 'dim-connectForm', onSubmit: persist, 'aria-busy': busy },
+      h('div', { className: 'dim-connectFields' }, storageDirectories.map((entry) => {
+        const { key, name, pickerTitle, usage } = entry;
+        const id = `${directoryId}-${key}`;
+        return h('div', { key, className: 'dim-connectField' },
+          h('div', { className: 'dim-connectFieldHead' },
+            h('label', { htmlFor: id }, name),
+            h('span', { className: 'dim-storageUsage' }, formatStorageBytes(storage[usage]))),
+          h('div', { className: 'dim-storagePathRow' },
+            h('input', {
+              id, type: 'text', className: 'dim-connectInput dim-connectInput--path', value: draft[key],
+              required: true, disabled: busy, spellCheck: false, autoComplete: 'off',
+              onChange: (event) => updateDirectory(key, event.target.value),
+            }),
+            h('button', {
+              type: 'button', className: 'dim-deliveryButton dim-connectButton',
+              'aria-label': pickerTitle, disabled: busy || !directoryPicker,
+              onClick: (event) => { trigger.current = event.currentTarget; setBrowse(entry); },
+            }, '选择目录')));
+      })),
+      h('div', { className: 'dim-connectGrid dim-storageLimits' }, storageLimits.map(([key, title, minimum]) =>
+        settingsField(title, h('input', {
+          type: 'number', className: 'dim-connectInput', min: minimum, max: 1_048_576, step: 1,
+          required: true, disabled: busy, value: draft[key], onChange: (event) => update(key, event.target.value),
+        }), key))),
+      h('div', { className: 'dim-connectActions dim-storageActions' },
+        moving && h('label', { className: 'dim-storageMove' },
+          h('input', {
+            type: 'checkbox', checked: removePrevious, disabled: busy,
+            onChange: (event) => setRemovePrevious(event.target.checked),
+          }), '迁移成功后删除旧副本'),
+        h('button', {
+          type: 'submit', className: 'dim-deliveryButton dim-connectButton', 'data-kind': 'primary', disabled: busy || !changed,
+        }, busy ? (moving ? '迁移并保存中…' : '保存中…') : '保存存储设置')),
+      feedback && h('p', { className: feedback.error ? 'dim-connectAlert' : 'dim-connectSuccess', role: feedback.error ? 'alert' : 'status' },
+        feedback.message)),
+    !!storage.requests?.length && h('ul', { className: 'dim-storageRequests' },
+      storage.requests.map(({ id, name, size, approved }) => h('li', { key: id },
+        h('span', null, name || '附件', ' · ', formatStorageBytes(size)),
+        button(approved ? '已允许本次下载' : '允许本次下载', () => void save('storage.approve', { id }), approved)))),
+    browse && h(WorkspaceDirectoryPicker, {
+      open: true, startPath: draft[browse.key], picker: directoryPicker, title: browse.pickerTitle,
+      pathLabel: '存储目录绝对路径', notice: '保存存储设置后才会迁移数据。',
+      onPicked: (path) => { if (path) updateDirectory(browse.key, path); closePicker(); }, onCancel: closePicker,
+    }));
 }
 
 export function MultipleConnectSettings({ rpc, openSession }) {
@@ -165,47 +231,87 @@ function SnowlumaEditor({ initial, save, dismiss }) {
     token: '', users: initial?.users?.join(', ') ?? '', groups: initial?.groups?.join(', ') ?? '',
   }));
   const [busy, setBusy] = React.useState(false);
-  const input = (key, type = 'text') => h('input', {
-    type, value: value[key], autoComplete: 'off',
-    onChange: (event) => setValue({ ...value, [key]: event.target.value }),
+  const [error, setError] = React.useState('');
+  const titleId = React.useId();
+  const hintId = React.useId();
+  const input = (key, props = {}) => h('input', {
+    type: 'text', name: key, value: value[key], className: 'dim-connectInput', autoComplete: 'off',
+    spellCheck: false, disabled: busy, ...props,
+    onChange: (event) => {
+      setValue((previous) => ({ ...previous, [key]: event.target.value }));
+      setError('');
+    },
   });
-  const submit = async () => {
+  const submit = async (event) => {
+    event.preventDefault();
+    if (busy || !value.name.trim() || !value.url.trim()) return;
     setBusy(true);
+    setError('');
     const ids = (value) => value.split(/[\s,，]+/u).filter(Boolean);
     try {
       if (await save('snowluma.set', {
-        ...value, ...(initial ? { botId: initial.botId } : {}),
+        ...value, url: value.url.trim(), ...(initial ? { botId: initial.botId } : {}),
         ...(initial && !value.token ? { token: undefined } : {}),
         users: ids(value.users), groups: ids(value.groups),
-      })) dismiss();
+      }, setError)) dismiss();
     } finally { setBusy(false); }
   };
-  return h('div', { className: 'dim-humanizeField' },
-    field(label('连接名称', 'Connection name'), input('name')),
-    field('OneBot WebSocket URL', input('url')),
-    field(initial?.hasToken ? label('Access Token（留空沿用）', 'Access Token (blank keeps current)') : 'Access Token', input('token', 'password')),
-    field(label('允许的 QQ 私聊账号', 'Allowed private QQ accounts'), input('users')),
-    field(label('允许的 QQ 群号', 'Allowed QQ groups'), input('groups')),
-    button(label('保存连接', 'Save connection'), () => void submit(), busy || !value.name.trim()),
-    button(label('取消', 'Cancel'), dismiss, busy));
+  return h('section', { className: 'dim-globalSection dim-connectCard', 'aria-labelledby': titleId },
+    h('h4', { className: 'dim-connectTitle', id: titleId }, initial ? '编辑连接' : '新增连接'),
+    h('form', { className: 'dim-connectForm', onSubmit: submit, 'aria-busy': busy },
+      h('div', { className: 'dim-connectGrid' },
+        settingsField('连接名称', input('name', { required: true, maxLength: 80, autoFocus: true })),
+        settingsField('OneBot WebSocket URL', input('url', { type: 'url', required: true, inputMode: 'url' }))),
+      settingsField(initial?.hasToken ? 'Access Token（留空沿用）' : 'Access Token', input('token', { type: 'password' })),
+      h('fieldset', { className: 'dim-snowlumaAccess', 'aria-describedby': hintId },
+        h('legend', { className: 'dim-connectTitle' }, '接收范围'),
+        h('div', { className: 'dim-connectGrid' },
+          settingsField('允许的 QQ 私聊账号', input('users')),
+          settingsField('允许的 QQ 群号', input('groups'))),
+        h('p', { className: 'dim-connectHint', id: hintId }, '多个号码用逗号或空格分隔。两项留空时不会接收消息。')),
+      error && h('p', { className: 'dim-connectAlert', role: 'alert' }, error),
+      h('div', { className: 'dim-connectActions' },
+        button('取消', dismiss, busy),
+        h('button', { type: 'submit', className: 'dim-deliveryButton dim-connectButton', 'data-kind': 'primary',
+          disabled: busy || !value.name.trim() || !value.url.trim() }, busy ? '保存中…' : '保存连接'))));
 }
 
 export function SnowlumaSettings({ rpc, openDelivery }) {
   const { status, error, save } = useConnections(rpc);
   const [editor, setEditor] = React.useState(null);
   const [removing, setRemoving] = React.useState(null);
-  return h('section', { className: 'dim-humanizePanel' },
-    h('h3', null, 'Snowluma'),
-    error && h('p', { role: 'alert' }, error),
-    button(label('新增 Snowluma 连接', 'Add Snowluma connection'), () => setEditor({})),
+  const [deleting, setDeleting] = React.useState(false);
+  const remove = async (botId) => {
+    setDeleting(true);
+    try {
+      if (await save('snowluma.delete', { botId })) {
+        setRemoving(null);
+        setEditor((previous) => previous?.botId === botId ? null : previous);
+      }
+    } finally { setDeleting(false); }
+  };
+  return h('section', { className: 'dim-snowlumaPanel' },
+    h('header', { className: 'dim-snowlumaHeader' },
+      h('h3', null, 'Snowluma'),
+      !editor && h('button', { type: 'button', className: 'dim-deliveryButton dim-connectButton', 'data-kind': 'primary',
+        onClick: () => setEditor({}) }, '新增 Snowluma 连接')),
+    error && h('p', { className: 'dim-connectAlert', role: 'alert' }, error),
     editor && h(SnowlumaEditor, { key: editor.botId ?? 'new', initial: editor.botId ? editor : null, save, dismiss: () => setEditor(null) }),
-    status?.snowluma.map((account) => h('fieldset', { key: account.botId, className: 'dim-humanizeField' },
-      h('legend', null, account.name),
-      h('span', null, account.connected ? label('已连接', 'Connected') : label('未连接', 'Disconnected')),
-      button(label('编辑', 'Edit'), () => setEditor(account)),
-      button(label('投递目标', 'Delivery targets'), () => openDelivery({ botId: account.botId, botName: account.name, channel: 'snowluma', connected: account.connected })),
+    status?.snowluma.length === 0 && !editor && h('p', { className: 'dim-globalSection dim-connectHint' }, '暂无 Snowluma 连接'),
+    status?.snowluma.map((account) => h('article', { key: account.botId, className: 'dim-globalSection dim-connectCard' },
+      h('div', { className: 'dim-connectFieldHead' },
+        h('h4', { className: 'dim-connectTitle' }, account.name),
+        h('span', { className: 'dim-snowlumaStatus', 'data-connected': account.connected }, account.connected ? '已连接' : '未连接')),
+      React.createElement('code', { className: 'dim-snowlumaEndpoint', title: account.url }, account.url),
       removing === account.botId
-        ? button(label('确认移除连接', 'Remove this connection'), () => void save('snowluma.delete', { botId: account.botId })
-          .then((saved) => { if (saved) setRemoving(null); }))
-        : button(label('移除连接', 'Remove connection'), () => setRemoving(account.botId)))));
+        ? h('div', { className: 'dim-connectActions', 'aria-busy': deleting },
+          button('取消', () => setRemoving(null), deleting),
+          h('button', { type: 'button', className: 'dim-deliveryButton', 'data-kind': 'danger',
+            disabled: deleting, onClick: () => void remove(account.botId) }, '确认移除连接'))
+        : h('div', { className: 'dim-connectActions' },
+          button('移除连接', () => setRemoving(account.botId), deleting),
+          button('投递目标', () => openDelivery({
+            botId: account.botId, botName: account.name, channel: 'snowluma', connected: account.connected,
+          }), !openDelivery),
+          button('编辑', () => { setRemoving(null); setEditor(account); }, editor !== null)))));
 }

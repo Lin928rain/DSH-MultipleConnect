@@ -8,7 +8,8 @@ import * as React from 'react';
 import TestRenderer from 'react-test-renderer';
 import { ConnectStore, DEFAULT_CONNECTION_SETTINGS } from '../plugin-src/host/connect-store.mjs';
 import { createDshMainHost, createMultipleConnect, installConnectRpc, MainConversation } from '../plugin-src/host/multiple-connect.mjs';
-import { MultipleConnectSettings } from '../plugin-src/client/multiple-connect-settings.js';
+import { MultipleConnectSettings, SnowlumaSettings } from '../plugin-src/client/multiple-connect-settings.js';
+import { WorkspaceDirectoryPickerContext } from '../plugin-src/client/workspace-editor.js';
 import { createDeliveryService } from '../plugin-src/host/delivery-service.mjs';
 import { askInWorkspaceSession } from '../src/channels/shared/workspace-session.mjs';
 import { captureExternal } from '../src/channels/shared/multiple-connect.mjs';
@@ -174,6 +175,98 @@ test('main conversation settings can create a main in the default workspace with
   await act(async () => buttons().find(({ children }) => children.includes('使用默认工作区创建主对话')).props.onClick());
   assert.deepEqual(calls.map(({ method }) => method), ['status', 'main.setup-default', 'status']);
   assert.ok(buttons().some(({ children }) => children.includes('打开主对话')));
+});
+
+test('storage settings browse either host directory and migrate only when saved', async (t) => {
+  const { act, create } = TestRenderer;
+  const database = 'C:/existing/database';
+  const cache = 'C:/existing/cache';
+  const nextDatabase = 'D:/new/database';
+  const nextCache = 'D:/new/cache';
+  const listed = [];
+  const saved = [];
+  const storage = {
+    messageDirectory: database, attachmentDirectory: cache,
+    cacheMiB: 5120, downloadMiB: 128, cacheDays: 30, historyDays: 0,
+    databaseBytes: 128, cacheBytes: 256,
+  };
+  const picker = {
+    async listDirectory(path) {
+      listed.push(path);
+      const next = path === database ? nextDatabase : path === cache ? nextCache : null;
+      return { path, crumbs: [{ path, name: path }],
+        entries: next ? [{ path: next, name: '迁移目标' }] : [] };
+    },
+  };
+  async function rpc(method, payload) {
+    if (method === 'status') return { ok: true, value: { bots: [], workspaces: [], storage: { ...storage } } };
+    assert.equal(method, 'storage.set');
+    saved.push(payload);
+    Object.assign(storage, payload);
+    return { ok: true, value: storage };
+  }
+  let ui;
+  await act(async () => {
+    ui = create(React.createElement(WorkspaceDirectoryPickerContext.Provider, { value: picker },
+      React.createElement(MultipleConnectSettings, { rpc })));
+  });
+  t.after(() => act(() => ui.unmount()));
+  const click = (name) => act(async () => ui.root.findAllByType('button').find((button) => (
+    button.props['aria-label'] === name || button.children.includes(name)
+  )).props.onClick({ currentTarget: null }));
+  const input = (key) => ui.root.findAllByType('input').find(({ props }) => props.id?.endsWith('-' + key));
+  await click('选择消息库目录');
+  assert.equal(listed.at(-1), database);
+  await act(async () => ui.root.findByProps({ type: 'button', title: nextDatabase }).props.onClick());
+  await click('选择此目录');
+  assert.equal(input('messageDirectory').props.value, nextDatabase);
+  assert.equal(input('attachmentDirectory').props.value, cache);
+  await click('选择附件缓存目录');
+  assert.equal(listed.at(-1), cache);
+  await click('取消');
+  assert.equal(input('attachmentDirectory').props.value, cache);
+  await click('选择附件缓存目录');
+  await act(async () => ui.root.findByProps({ type: 'button', title: nextCache }).props.onClick());
+  await click('选择此目录');
+  assert.equal(input('attachmentDirectory').props.value, nextCache);
+  assert.equal(saved.length, 0);
+  await act(async () => ui.root.findByType('form').props.onSubmit({ preventDefault() {} }));
+  assert.deepEqual(saved, [{
+    messageDirectory: nextDatabase, attachmentDirectory: nextCache, cacheMiB: 5120,
+    downloadMiB: 128, cacheDays: 30, historyDays: 0, removePrevious: false,
+  }]);
+});
+
+test('Snowluma editing preserves the saved token and parses QQ IDs', async (t) => {
+  const { act, create } = TestRenderer;
+  const changes = [];
+  const account = {
+    botId: 'snowluma-fixture', name: 'Fixture', url: 'ws://127.0.0.1:3001/',
+    users: ['12345'], groups: [], hasToken: true, connected: true,
+  };
+  async function rpc(method, payload) {
+    if (method === 'status') return { ok: true, value: { snowluma: [account] } };
+    changes.push({ method, payload });
+    return { ok: true, value: {} };
+  }
+  let ui;
+  await act(async () => { ui = create(React.createElement(SnowlumaSettings, { rpc })); });
+  t.after(() => act(() => ui.unmount()));
+  const click = (name) => act(async () => ui.root.findAllByType('button')
+    .find((button) => button.children.includes(name)).props.onClick());
+  await click('编辑');
+  const token = ui.root.findByProps({ name: 'token' });
+  assert.equal(token.props.type, 'password');
+  assert.equal(token.props.value, '');
+  await act(async () => ui.root.findByProps({ name: 'groups' }).props.onChange({ target: { value: '123，456 789' } }));
+  await act(async () => ui.root.findByType('form').props.onSubmit({ preventDefault() {} }));
+  assert.deepEqual(changes, [{ method: 'snowluma.set', payload: {
+    botId: account.botId, name: account.name, url: account.url, token: undefined,
+    users: ['12345'], groups: ['123', '456', '789'],
+  } }]);
+  await click('移除连接');
+  await click('取消');
+  assert.equal(changes.length, 1);
 });
 
 test('two internal chats retain their own delivery and a queued turn follows main archival', async () => {
