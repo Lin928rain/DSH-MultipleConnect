@@ -189,6 +189,7 @@ export interface AgentHandleLike {
 }
 
 export interface WakeDriverDeps {
+  deliverReply?: (sessionId: string, text: string) => Promise<string | undefined>;
   agents: AgentsFacade;
   /** Persisted-session reader for forking from cold parents (optional: fork degrades to failed when absent). */
   sessionPersistence?: SessionInspectLike;
@@ -458,13 +459,22 @@ export class WakeDriver {
         this.compactWake(agent, startIndex, alarm, firedAt, compaction, analysis.noReplyReason);
       }
     }
+    let note = analysis.note;
+    if (analysis.deliveryText && this.deps.deliverReply) {
+      try {
+        note = await this.deps.deliverReply(actualSessionId, analysis.deliveryText) ?? note;
+      } catch (error) {
+        this.deps.log("warn", "wake IM delivery failed for alarm " + alarm.id + ": " + String(error));
+        note = "IM delivery failed";
+      }
+    }
     return {
       outcome: "ok",
       sessionId: actualSessionId,
       analysis: {
         decision: analysis.decision,
         budgetDelta: analysis.budgetDelta,
-        ...(analysis.note !== undefined ? { note: analysis.note } : {}),
+        ...(note !== undefined ? { note } : {}),
         ...(analysis.reasoningSummary !== undefined ? { reasoningSummary: analysis.reasoningSummary } : {}),
         ...(analysis.replySummary !== undefined ? { replySummary: analysis.replySummary } : {}),
         ...(analysis.noReplyReason !== undefined ? { noReplyReason: analysis.noReplyReason } : {})

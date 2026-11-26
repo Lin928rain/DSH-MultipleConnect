@@ -9,6 +9,7 @@ import { registerManagementRpc } from '../management-rpc.mjs';
 import { resolveRpcAuthority } from './rpc-authority.mjs';
 import { ConnectStore } from './connect-store.mjs';
 import { InboxStorage, readInboxLayout } from './inbox-storage.mjs';
+import { createWakeDelivery } from './wake-delivery.mjs';
 import { inboxAttachments, inboxReply } from '../../src/channels/shared/multiple-connect.mjs';
 
 export const CONNECT_RPC = '/dsh-multiple-connect';
@@ -213,6 +214,7 @@ export function createMultipleConnect(ctx, config, deliveryService, {
   const recentPreviews = new Map();
   let previewCount = 0;
   const main = new MainConversation(store, host);
+  const wakeDelivery = createWakeDelivery({ store, main, deliveryService, providerFor: (botId) => providers.get(botId), logger });
   let instanceId = store.getState('instance');
   if (!instanceId) {
     instanceId = randomUUID();
@@ -257,7 +259,7 @@ export function createMultipleConnect(ctx, config, deliveryService, {
   void kick();
 
   const api = {
-    main, store, storage, kick,
+    main, store, storage, kick, wakeDelivery,
     provider: (botId) => providers.get(botId),
     async listChats(botId, { before, query = '', kind = '' }) {
       const provider = providers.get(botId);
@@ -344,6 +346,11 @@ export function installConnectRpc(ctx, runtime, deliveryService, config, snowlum
       }
       if (endpoint === 'storage.set') return { ok: true, value: await runtime.storage.configure(payload) };
       if (endpoint === 'storage.approve') return { ok: true, value: runtime.storage.approve(payload.id) };
+      if (endpoint === 'wake-delivery.status') return { ok: true, value: await runtime.wakeDelivery.status() };
+      if (endpoint === 'wake-delivery.set') {
+        await runtime.wakeDelivery.configure(payload);
+        return { ok: true, value: await runtime.wakeDelivery.status() };
+      }
       if (['connection.set', 'conversation.list', 'conversation.set'].includes(endpoint)) {
         const bots = await deliveryService.listBots();
         if (!bots.some(({ botId }) => botId === payload.botId)) throw new Error('Unknown connection');

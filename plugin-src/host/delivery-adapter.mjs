@@ -4,6 +4,7 @@ import {
   privateDeliverySuggestionFromConversationKey,
   resolvePrivateConversationKey,
 } from './delivery-suggestions.mjs';
+import { evaluateAccessPolicy } from '../../src/channels/shared/access-policy.mjs';
 
 const CHANNELS = new Set([
   'weixin',
@@ -280,6 +281,11 @@ export function createDeliveryAdapter({ channel, workspaces, coreController, sta
     },
     ownsBot: (botId) => workspaces.has(botId),
     listBots: () => workspaces.listBotIds(),
+    allowsWakeRecipient(botId, senderId) {
+      return evaluateAccessPolicy(workspaces.accessPolicyFor?.(botId), {
+        conversationType: 'direct', senderIds: senderId,
+      }).allowed;
+    },
     async listTargets(botId) {
       const targets = workspaces.listDeliveryTargets(botId);
       const configured = new Map(

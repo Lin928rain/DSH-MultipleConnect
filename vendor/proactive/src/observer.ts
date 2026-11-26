@@ -33,6 +33,7 @@ export interface WakeAnalysis {
   reasoningSummary?: string;
   /** Truncated visible-reply summary of the turn, for the run history. */
   replySummary?: string;
+  deliveryText?: string;
   /** The proactive_reclaim reason the model gave for staying silent, for the run history. */
   noReplyReason?: string;
   /**
@@ -55,6 +56,7 @@ export interface WakeAnalysis {
  * other plugin's tools (no name matching, no coupling).
  */
 const PROACTIVE_RECLAIM_TOOL = "proactive_reclaim";
+const EXPLICIT_IM_TOOLS = new Set(["send_im", "no_reply", PROACTIVE_RECLAIM_TOOL, "proactive_silence"]);
 
 /** Per-field summary cap for the run history (reasoning + reply are stored truncated). */
 export const RUN_SUMMARY_MAX_LENGTH = 200;
@@ -139,6 +141,7 @@ export function isFramingNotice(event: MinimalEvent): boolean {
   // ({kind:"plugin", plugin}) is still accepted so pre-migration logs and
   // replayed fixtures keep anchoring.
   const ours = source["kind"] === PROACTIVE_SOURCE_KIND
+    || source["kind"] === "dsh-proactive"
     || (source["kind"] === "plugin" && source["plugin"] === "dsh-proactive");
   if (!ours) return false;
   const blocks = Array.isArray(event.data["content"]) ? event.data["content"] : [];
@@ -176,6 +179,8 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   const textParts: string[] = [];
   const reasoningParts: string[] = [];
   const toolNames: string[] = [];
+  let deliveryParts: string[] = [];
+  let allowImDelivery = framingAt >= 0;
   let noReplyReason: string | undefined;
   let proactiveSilence = false;
   for (const event of turnSegment) {
@@ -184,13 +189,17 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
       if (texts.length > 0) {
         hasText = true;
         textParts.push(...texts);
+        if (event.data["interrupted"] !== true) deliveryParts.push(...texts);
       }
       const reasoning = extractReasoningBlocks(event.data);
       if (reasoning.length > 0) reasoningParts.push(...reasoning);
     }
-    if (event.type === "tool/call") {
+    if (event.type === "user/message" && !isFramingNotice(event)) allowImDelivery = false;
+    if (event.type === "tool/call" || event.type === "tool/code-dispatch-start") {
       const name = typeof event.data["name"] === "string" ? event.data["name"] : "";
-      if (name.length > 0) toolNames.push(name);
+      deliveryParts = [];
+      if (EXPLICIT_IM_TOOLS.has(name)) allowImDelivery = false;
+      if (name.length > 0 && event.type === "tool/call") toolNames.push(name);
       if (name === PROACTIVE_RECLAIM_TOOL) {
         proactiveSilence = true;
         if (noReplyReason === undefined) noReplyReason = extractSilenceReason(event.data);
@@ -199,6 +208,9 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
   }
   const turnEnded = turnEndIndex >= 0;
   const errorEnd = turnEnded && isErrorEnd(effective[turnEndIndex]?.data);
+  const reason = effective[turnEndIndex]?.data["reason"];
+  const completed = reason === "completed" || (isRecord(reason) && reason["kind"] === "completed");
+  const deliveryText = allowImDelivery && completed ? deliveryParts.join("\n\n").trim() : "";
 
   let decision: RunDecision;
   let note: string | undefined;
@@ -229,6 +241,7 @@ export function analyzeWakeTurn(events: readonly MinimalEvent[], startIndex: num
     compactable,
     ...(reasoningParts.length > 0 ? { reasoningSummary: truncateSummary(reasoningParts.join("\n")) } : {}),
     ...(textParts.length > 0 ? { replySummary: truncateSummary(textParts.join("\n")) } : {}),
+    ...(deliveryText ? { deliveryText } : {}),
     ...(noReplyReason !== undefined ? { noReplyReason } : {}),
     ...(note !== undefined ? { note } : {})
   };

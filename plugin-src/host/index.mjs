@@ -230,6 +230,7 @@ export function createImHostPlugin(internals = {}) {
               dataDir: join(connectDataDirectory(config), 'proactive'),
               currentMain: async () => (await runtime.main.ensure())?.sessionId,
               isMain: (id) => runtime.main.current()?.sessionId === id,
+              deliverReply: (sessionId, text) => runtime.wakeDelivery.send(sessionId, text),
               archived: (id) => proactiveCtx.get('workspaceRegistry', false)?.archivedSessionIds.includes(id),
             });
             proactiveCtx.effect(() => dispose, 'dsh-multiple-connect scheduler');

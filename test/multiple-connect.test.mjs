@@ -142,6 +142,78 @@ test('the delivery picker includes bot-local inbox chats without independent DSH
   } finally { await runtime.close(); }
 });
 
+test('main wake uses one permitted internal DM, with an optional fixed recipient and no fallback from it', async () => {
+  const store = new ConnectStore(':memory:');
+  const { host, archived } = hostFixture();
+  const service = createDeliveryService();
+  const sent = [];
+  const allowed = new Set(['ou_one', 'ou_two']);
+  const runtime = createMultipleConnect({}, {}, service, { store, host, logger: { warn() {} } });
+  let blockBeforeSend;
+  const botIds = ['feishu-1', 'feishu-2'];
+  service.registerAdapter(createDeliveryAdapter({
+    channel: 'feishu',
+    workspaces: {
+      has: async (id) => {
+        if (blockBeforeSend) await blockBeforeSend();
+        return botIds.includes(id);
+      },
+      listBotIds: () => botIds,
+      listDeliveryTargets: () => [],
+    },
+    stateFor: () => ({ snapshot: () => ({ sessions: {} }) }),
+    coreController: { sendProactiveText: (botId, target, text) => sent.push({ botId, route: target.route, text }) },
+  }));
+  const lark1 = runtime.connection(botIds[0]);
+  const lark2 = runtime.connection(botIds[1]);
+  for (const lark of [lark1, lark2]) {
+    lark.bindInboxProvider({ allowsWakeRecipient: (id) => allowed.has(id) });
+  }
+  const dm = (id, person, extra = {}) => ({
+    ...sample(id), senderId: person, conversationId: 'p2p:' + person, ...extra,
+  });
+  try {
+    const { sessionId } = await runtime.main.ensure();
+    store.configure(botIds[0], configured({ mode: 'internal' }));
+    lark1.receive(dm(1, 'ou_one', { routeId: 'oc_one', chatName: 'First chat' }));
+    lark1.receive(dm(2, 'ou_three', { routeId: 'oc_blocked' }));
+    lark1.receive({ ...sample(3), conversationId: 'group:oc_group', kind: 'group' });
+    lark2.receive(dm(1, 'ou_two', { routeId: 'oc_two' }));
+    assert.equal(await runtime.wakeDelivery.send('other-session', 'do not relay'), undefined);
+    assert.equal(await runtime.wakeDelivery.send(sessionId, 'Wake reply'), 'IM delivered (feishu)');
+    assert.deepEqual(sent, [{ botId: botIds[0], route: { openId: 'ou_one' }, text: 'Wake reply' }]);
+
+    store.configure(botIds[1], configured({ mode: 'internal' }));
+    assert.match(await runtime.wakeDelivery.send(sessionId, 'Ambiguous'), /choose one internal private chat/);
+    assert.equal(sent.length, 1);
+    const { choices } = await runtime.wakeDelivery.status();
+    assert.deepEqual(choices.map(({ botId, chatId, name }) => [botId, chatId, name]), [
+      [botIds[0], 'oc_one', 'First chat'], [botIds[1], 'oc_two', null],
+    ]);
+    await runtime.wakeDelivery.configure({ mode: 'pinned', id: choices[1].id });
+    store.pruneMessages(Date.now() + 10_000);
+    assert.equal(await runtime.wakeDelivery.send(sessionId, 'Pinned wake reply'), 'IM delivered (feishu)');
+    assert.equal(sent.at(-1).botId, botIds[1]);
+    assert.equal((await runtime.wakeDelivery.status()).choices[0].id, choices[1].id);
+
+    // Even a route changed while the send awaits adapter resolution must not receive the reply.
+    blockBeforeSend = async () => {
+      blockBeforeSend = undefined;
+      store.configureChat(botIds[1], 'oc_two', { mode: 'external', autoNotify: true, threshold: 1 });
+    };
+    assert.match(await runtime.wakeDelivery.send(sessionId, 'Blocked on recheck'), /IM delivery failed/);
+    assert.match(await runtime.wakeDelivery.send(sessionId, 'Unavailable'), /selected chat is unavailable/);
+    assert.equal(sent.length, 2);
+
+    await runtime.wakeDelivery.configure({ mode: 'disabled' });
+    assert.equal(await runtime.wakeDelivery.send(sessionId, 'Disabled'), 'IM delivery disabled');
+    archived.add(sessionId);
+    const replacement = await runtime.main.ensure();
+    assert.equal(await runtime.wakeDelivery.send(sessionId, 'Old main'), undefined);
+    assert.equal(await runtime.wakeDelivery.send(replacement.sessionId, 'Disabled after replacement'), 'IM delivery disabled');
+  } finally { await runtime.close(); }
+});
+
 test('legacy chats are discovered at upgrade and Telegram topics inherit the group configuration', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'multiple-connect-chat-migration-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -274,6 +346,32 @@ test('main conversation settings can create a main in the default workspace with
   await act(async () => buttons().find(({ children }) => children.includes('使用默认工作区创建主对话')).props.onClick());
   assert.deepEqual(calls.map(({ method }) => method), ['status', 'main.setup-default', 'status']);
   assert.ok(buttons().some(({ children }) => children.includes('打开主对话')));
+});
+
+test('main conversation settings save a selected wake recipient', async (t) => {
+  const { act, create } = TestRenderer;
+  const recipient = { id: 'private-choice', channel: 'feishu', botId: 'lark', conversationId: 'p2p:ou_self' };
+  let saved;
+  async function rpc(method, payload) {
+    if (method === 'status') return { ok: true, value: { main: { sessionId: 'main' }, bots: [] } };
+    if (method === 'wake-delivery.status') {
+      return { ok: true, value: { mode: 'automatic', selected: null, choices: [recipient] } };
+    }
+    assert.equal(method, 'wake-delivery.set');
+    saved = payload;
+    return { ok: true, value: { mode: 'pinned', selected: recipient, choices: [recipient] } };
+  }
+  let renderer;
+  await act(async () => { renderer = create(React.createElement(MultipleConnectSettings, { rpc })); });
+  t.after(() => act(() => renderer.unmount()));
+  await act(async () => renderer.root.findAllByType('button')
+    .find(({ children }) => children.includes('主动唤醒投递设置')).props.onClick());
+  const select = renderer.root.findByType('select');
+  assert.equal(select.props.value, 'automatic');
+  await act(async () => select.props.onChange({ target: { value: recipient.id } }));
+  await act(async () => renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }));
+  assert.deepEqual(saved, { mode: 'pinned', id: recipient.id });
+  assert.equal(select.props.value, recipient.id);
 });
 
 test('storage settings browse either host directory and migrate only when saved', async (t) => {

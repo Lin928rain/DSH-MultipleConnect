@@ -10135,6 +10135,7 @@ test('step push live_cot mode uses Feishu native process and sends the final ans
   const sent = [];
   const writes = [];
   const creates = [];
+  const closes = [];
   const channel = {
     ...stepPushChannel(),
     createCot: async (chatId, options) => {
@@ -10142,6 +10143,11 @@ test('step push live_cot mode uses Feishu native process and sends the final ans
       return { cotId: 'cot-live', messageId: 'om-cot-live' };
     },
     writeCotEvents: async (_handle, events) => writes.push(...events),
+    completeCot: async (handle, reason) => {
+      assert.equal(writes.at(-1)?.event_type, 'RUN_FINISHED');
+      assert.equal(sent.length, 0);
+      closes.push({ handle, reason });
+    },
   };
   const bridge = new FeishuHarnessBridge({
     client: stepPushTextClient((text) => sent.push(text)),
@@ -10202,6 +10208,7 @@ test('step push live_cot mode uses Feishu native process and sends the final ans
     'RUN_FINISHED',
   ]);
   assert.deepEqual(sent, ['FINAL_MARKER_9f3a 过程候选']);
+  assert.deepEqual(closes, [{ handle: { cotId: 'cot-live', messageId: 'om-cot-live' }, reason: 'done' }]);
   assert.ok(!sent.at(-1).includes('PROCESS_MARKER_9f3a'));
 });
 

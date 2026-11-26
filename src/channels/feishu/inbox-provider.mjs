@@ -15,9 +15,10 @@ function itemRecord(item, client, ancestors) {
   };
 }
 
-export function createFeishuInboxProvider(client, { signal: lifetime, allowHistoryItem } = {}) {
+export function createFeishuInboxProvider(client, { signal: lifetime, allowHistoryItem, allowsWakeRecipient } = {}) {
   return {
     capabilities: ['reply', 'forward', 'history'],
+    allowsWakeRecipient,
     async open({ key, messageId, type }, options) {
       const signal = lifetime ? AbortSignal.any([lifetime, options.signal]) : options.signal;
       return { stream: await feishuResourceStream({ message: { message_id: messageId } }, client, key, type, { ...options, signal }) };

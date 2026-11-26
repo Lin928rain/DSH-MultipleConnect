@@ -314,7 +314,7 @@ test('VerifiedFeishuChannel checks reaction API results', async () => {
   assert.equal(calls.reactionsRemoved[0].path.reaction_id, 'reaction-test');
 });
 
-test('VerifiedFeishuChannel opens and writes a native thinking process', async () => {
+test('VerifiedFeishuChannel opens, writes and closes a native thinking process', async () => {
   const { client, calls } = fakeClient();
   const channel = new VerifiedFeishuChannel({ client });
 
@@ -328,6 +328,7 @@ test('VerifiedFeishuChannel opens and writes a native thinking process', async (
     timestamp: '1',
   }];
   await channel.writeCotEvents(handle, events);
+  await channel.completeCot(handle, 'done');
 
   assert.deepEqual(handle, { cotId: 'cot-test', messageId: 'om-cot-test' });
   assert.deepEqual(calls.rawRequests, [
@@ -350,6 +351,11 @@ test('VerifiedFeishuChannel opens and writes a native thinking process', async (
         message_id: 'om-cot-test',
         cot_id: 'cot-test',
       },
+    },
+    {
+      method: 'POST',
+      url: '/open-apis/im/v1/message_cot/complete/cot-test?message_id=om-cot-test&reason=done',
+      data: {},
     },
   ]);
 });

@@ -1,6 +1,6 @@
 {
   "name": "dsh-multiple-connect",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "icon": "./assets/logo-plugin-message-link-gradient.webp",
   "description": "Connect messaging platforms to a shared DeepSeek Harness conversation and a persistent external inbox.",
   "keywords": [

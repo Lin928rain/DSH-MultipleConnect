@@ -134,6 +134,10 @@ export function deliverySuggestionFromConversationKey(channel, key) {
 export function deliverySuggestionFromInbox(channel, { conversationId, kind }) {
   if (typeof conversationId !== 'string' || !conversationId || conversationId.length > 1024) return null;
   switch (channel) {
+    case 'snowluma': {
+      const direct = kind === 'direct' && /^[1-9]\d*:private:([1-9]\d*)$/u.exec(conversationId);
+      return direct ? { kind: 'user', route: { chatId: direct[1] } } : null;
+    }
     case 'feishu':
       // Proactive Feishu targets address the chat. Topic suffixes only scope replies and history.
       return deliverySuggestionFromConversationKey(channel, conversationId.replace(/:(?:thread|managed):[^:\s]+$/u, ''));

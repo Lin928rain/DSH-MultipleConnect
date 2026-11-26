@@ -331,6 +331,18 @@ export class ConnectStore {
       FROM messages WHERE bot_id = ? GROUP BY conversation_id ORDER BY max(id) DESC`).iterate(botId);
   }
 
+  wakeConversations(botId, channel) {
+    return this.db.prepare(`SELECT conversationId, chatId, inbox.kind, senderId, chat_routes.name
+      FROM (
+        SELECT conversation_id AS conversationId, kind,
+          COALESCE(json_extract(details, '$.routingChatId'),
+            CASE WHEN ? = 'feishu' THEN json_extract(details, '$.chatId') END,
+            conversation_id) AS chatId, max(sender_id) AS senderId, max(id) AS latest
+        FROM messages WHERE bot_id = ? AND kind = 'direct' GROUP BY conversation_id, chatId
+      ) AS inbox JOIN chat_routes ON chat_routes.bot_id = ? AND chat_routes.chat_id = inbox.chatId
+      ORDER BY latest DESC`).iterate(channel, botId, botId);
+  }
+
   readMessages(botId, conversationId, before, limit) {
     return this.db.prepare(`SELECT id AS cursor, message_id AS messageId,
         sender_id AS senderId, text, attachments, received_at AS receivedAt, details

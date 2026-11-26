@@ -200,6 +200,10 @@ export class DeliveryService {
     return bots;
   }
 
+  allowsWakeRecipient(channel, botId, senderId) {
+    return this.#adapters.get(channel)?.adapter.allowsWakeRecipient?.(botId, senderId) === true;
+  }
+
   async listSuggestions(botId) {
     const id = botIdOf(botId);
     const adapter = await this.#adapterFor(id);

@@ -336,11 +336,55 @@ function StorageSettings({ storage, save }) {
     }));
 }
 
+function WakeDeliverySettings({ rpc }) {
+  const [status, setStatus] = React.useState(null);
+  const [value, setValue] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  function display(next) {
+    setStatus(next);
+    setValue(next.selected?.id ?? next.mode);
+  }
+  async function update(endpoint, payload = {}) {
+    setBusy(true);
+    setError('');
+    try { display(await invoke(rpc, endpoint, payload)); }
+    catch (failure) { setError(failure.message ?? String(failure)); }
+    finally { setBusy(false); }
+  }
+  React.useEffect(() => { void update('wake-delivery.status'); }, [rpc]);
+  function submit(event) {
+    event.preventDefault();
+    if (busy || !value) return;
+    const payload = value === 'automatic' || value === 'disabled'
+      ? { mode: value } : { mode: 'pinned', id: value };
+    void update('wake-delivery.set', payload);
+  }
+  const selected = status?.selected;
+  const choiceLabel = (choice) => [choice.channel, choice.botId, choice.name || choice.conversationId].join(' · ');
+  return h('form', { onSubmit: submit, className: 'dim-globalSection dim-connectForm', 'aria-busy': busy },
+    h('p', { className: 'dim-connectHint' },
+      localizeText('主对话的闹钟回复可以自动发到一个内连私聊。自动选择仅在符合条件的私聊只有一个时发送。')),
+    status && field(localizeText('主动唤醒收件人'),
+      h('select', { value, disabled: busy, onChange: (event) => setValue(event.target.value) },
+        h('option', { value: 'automatic' }, localizeText('自动选择唯一符合条件的私聊')),
+        h('option', { value: 'disabled' }, localizeText('仅在 DSH 回复')),
+        selected && !status.choices.some((choice) => choice.id === selected.id)
+          && h('option', { value: selected.id }, localizeText('已选私聊暂不可用')),
+        ...status.choices.map((choice) => h('option', { key: choice.id, value: choice.id }, choiceLabel(choice))))),
+    error && h('p', { role: 'alert', className: 'dim-connectAlert' }, error),
+    h('div', { className: 'dim-connectActions' },
+      button(localizeText('刷新私聊列表'), () => void update('wake-delivery.status'), busy),
+      h('button', { type: 'submit', className: 'dim-deliveryButton dim-connectButton', 'data-kind': 'primary',
+        disabled: busy || !status || value === (status.selected?.id ?? status.mode) }, localizeText('保存收件人'))));
+}
+
 export function MultipleConnectSettings({ rpc, openSession }) {
   const { status, error, save } = useConnections(rpc);
   const [workspace, setWorkspace] = React.useState('');
   const [confirmArchive, setConfirmArchive] = React.useState(false);
   const [creatingMain, setCreatingMain] = React.useState(false);
+  const [showWakeDelivery, setShowWakeDelivery] = React.useState(false);
   async function createMain(useDefault) {
     setCreatingMain(true);
     try {
@@ -372,6 +416,9 @@ export function MultipleConnectSettings({ rpc, openSession }) {
             status.workspaces.map((item) => h('option', { key: item.workspaceId, value: item.workspaceId }, item.title)))),
         button(label('创建主对话', 'Create main conversation'), () => void createMain(false), creatingMain || !workspace)),
     error && h('p', { role: 'alert' }, error),
+    status?.main && h('button', { type: 'button', className: 'dim-deliveryButton', 'aria-expanded': showWakeDelivery,
+      onClick: () => setShowWakeDelivery((open) => !open) }, localizeText('主动唤醒投递设置')),
+    status?.main && showWakeDelivery && h(WakeDeliverySettings, { rpc }),
     status?.storage && h(StorageSettings, { storage: status.storage, save }),
     h(RoutingConnections, { status, save, rpc }));
 }

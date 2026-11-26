@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 import { FeishuLiveCot } from '../../../src/channels/feishu/live-cot.mjs';
 
-function fixture({ createError, writeError } = {}) {
-  const calls = { creates: [], writes: [], failures: [] };
+function fixture({ createError, writeError, completeError } = {}) {
+  const calls = { creates: [], writes: [], completes: [], failures: [] };
   const channel = {
     async createCot(chatId, options) {
       calls.creates.push({ chatId, options });
@@ -14,6 +14,10 @@ function fixture({ createError, writeError } = {}) {
     async writeCotEvents(handle, events) {
       calls.writes.push({ handle, events });
       if (writeError) throw writeError;
+    },
+    async completeCot(handle, reason) {
+      calls.completes.push({ handle, reason, lastEvent: decoded(calls).at(-1)?.type });
+      if (completeError) throw completeError;
     },
   };
   const cot = new FeishuLiveCot(channel, 'oc-chat', {
@@ -84,6 +88,9 @@ test('FeishuLiveCot maps a complete Harness process to ordered native events', a
   )));
   assert.ok(!JSON.stringify(events).includes('最终答案'),
     'the final assistant message belongs to the ordinary answer message');
+  assert.deepEqual(calls.completes, [{
+    handle: { cotId: 'cot-1', messageId: 'om-cot-1' }, reason: 'done', lastEvent: 'RUN_FINISHED',
+  }]);
 });
 
 test('FeishuLiveCot bounds tool output and closes failed turns', async () => {
@@ -151,6 +158,7 @@ for (const reason of [
     assert.equal(terminal.type, 'RUN_ERROR');
     assert.equal(terminal.content.code, 'TURN_FAILED');
     assert.match(terminal.content.message, new RegExp(reason.kind));
+    assert.equal(calls.completes[0].reason, 'error');
   });
 }
 
@@ -163,6 +171,27 @@ test('FeishuLiveCot contains native process failures', async () => {
 
   assert.deepEqual(calls.failures, [failure]);
   assert.equal(calls.writes.length, 0);
+  assert.equal(calls.completes.length, 0);
+});
+
+test('FeishuLiveCot still closes a created process after a write fails, once for concurrent callers', async () => {
+  const failure = new Error('native CoT progress write failed');
+  const { cot, calls } = fixture({ writeError: failure });
+  await cot.handle({ type: 'turn-start', turn: 1 });
+  await Promise.all([cot.finish(), cot.finish()]);
+  assert.deepEqual(calls.failures, [failure]);
+  assert.deepEqual(decoded(calls).map(({ type }) => type), ['RUN_STARTED']);
+  assert.equal(calls.completes.length, 1);
+  assert.equal(calls.completes[0].reason, 'done');
+});
+
+test('FeishuLiveCot reports close failure without rejecting final answer handling', async () => {
+  const failure = new Error('native CoT close failed');
+  const { cot, calls } = fixture({ completeError: failure });
+  await cot.handle({ type: 'turn-start', turn: 1 });
+  await cot.finish();
+  assert.deepEqual(calls.failures, [failure]);
+  assert.equal(calls.completes[0].lastEvent, 'RUN_FINISHED');
 });
 
 test('FeishuLiveCot queues reasoning without waiting for each network write', async () => {
@@ -178,6 +207,7 @@ test('FeishuLiveCot queues reasoning without waiting for each network write', as
       writes.push(events);
       if (calls === 1) await releaseFirstWrite.promise;
     },
+    async completeCot() {},
   };
   const cot = new FeishuLiveCot(channel, 'oc-chat');
 

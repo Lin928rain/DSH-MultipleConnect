@@ -548,6 +548,9 @@ export class QqHarnessBridge {
     this.#humanize = humanize ?? null;
     this.#signal = signal;
     const unbindInbox = harness.multipleConnect?.bindInboxProvider?.({
+      allowsWakeRecipient: (senderId) => this.#accessPolicy
+        ? evaluateInboundAccess(this.#accessPolicy, { conversationType: 'direct', senderIds: senderId }).allowed
+        : senderAllowed({ senderId }, this.#ownerUserOpenid),
       open: ({ url }, limits) => fetchFileStream(url, { ...limits, fetchImpl, allowedHosts: QQ_IMAGE_HOSTS }),
     });
     if (unbindInbox) signal?.addEventListener('abort', unbindInbox, { once: true });

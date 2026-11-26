@@ -89,7 +89,7 @@ export class FeishuLiveCot {
   #pending = [];
   #reasoningOpen = false;
   #heldAssistant = null;
-  #finished = false;
+  #completion = null;
   #broken = false;
   #messageIndex = 0;
 
@@ -169,7 +169,7 @@ export class FeishuLiveCot {
   }
 
   async handle(update) {
-    if (!update || this.#finished || this.#broken) return;
+    if (!update || this.#completion || this.#broken) return;
     if (update.type === 'turn-start') {
       await this.#start(update.turn);
       return;
@@ -231,30 +231,35 @@ export class FeishuLiveCot {
     }
   }
 
-  async finish(reason) {
-    if (this.#finished) {
-      await this.#chain;
-      return;
-    }
-    this.#finished = true;
+  finish(reason) {
+    return this.#completion ??= this.#finish(reason);
+  }
+
+  async #finish(reason) {
     this.#heldAssistant = null;
-    if (this.#turn === null || this.#broken) {
-      await this.#chain;
-      return;
-    }
-    await this.#closeReasoning();
+    const handle = await this.#opening;
+    if (!handle) return;
     const failure = reason instanceof Error
-      ? reason.message
+      ? reason.message || 'Turn failed'
       : turnFailure(reason);
-    await this.#write([
-      failure
-        ? cotEvent('RUN_ERROR', { message: failure, code: 'TURN_FAILED' })
-        : cotEvent('RUN_FINISHED', {
-            threadId: this.#chatId,
-            runId: `turn-${this.#turn}`,
-            status: 'done',
-          }),
-    ]);
-    await this.#chain;
+    try {
+      await this.#closeReasoning();
+      await this.#write([
+        failure
+          ? cotEvent('RUN_ERROR', { message: failure, code: 'TURN_FAILED' })
+          : cotEvent('RUN_FINISHED', {
+              threadId: this.#chatId,
+              runId: `turn-${this.#turn}`,
+              status: 'done',
+            }),
+      ]);
+      await this.#chain;
+    } finally {
+      try {
+        await this.#channel.completeCot(handle, failure ? 'error' : 'done');
+      } catch (error) {
+        this.#onFailure(error, { phase: 'complete', messageId: handle.messageId });
+      }
+    }
   }
 }

@@ -402,6 +402,9 @@ export class WeixinHarnessBridge {
     this.#typingKeepaliveMs = typingKeepaliveMs;
     this.#signal = signal;
     const unbindInbox = harness.multipleConnect?.bindInboxProvider?.({
+      allowsWakeRecipient: (senderIds) => this.#accessPolicy
+        ? evaluateInboundAccess(this.#accessPolicy, { conversationType: 'direct', senderIds }).allowed
+        : senderIds === this.#ownerUserId,
       open: (source, limits) => api.openInboxMedia(source, limits),
     });
     if (unbindInbox) signal?.addEventListener('abort', unbindInbox, { once: true });

@@ -416,6 +416,15 @@ export class VerifiedFeishuChannel {
     }));
   }
 
+  async completeCot(handle, reason) {
+    const params = new URLSearchParams({ message_id: handle.messageId, reason });
+    assertApiSuccess('Feishu message_cot.complete', await this.#client.request({
+      method: 'POST',
+      url: `${COT_API}/complete/${encodeURIComponent(handle.cotId)}?${params}`,
+      data: {},
+    }));
+  }
+
   async #sendArtifact(chatId, file, {
     replyTo,
     signal,

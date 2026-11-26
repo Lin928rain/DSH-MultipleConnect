@@ -83,6 +83,7 @@ export async function apply(ctx: Context, integration: {
   dataDir?: string;
   currentMain?: () => Promise<string | undefined>;
   isMain?: (sessionId: string) => boolean;
+  deliverReply?: WakeDriverDeps["deliverReply"];
   archived?: (sessionId: string) => boolean;
 } = {}): Promise<() => Promise<void>> {
   ctx.logger.info("dsh-proactive: applying (trace).");
@@ -170,6 +171,7 @@ export async function apply(ctx: Context, integration: {
     modelSelection: () => currentModelSelection(ctx),
     store,
     config,
+    deliverReply: integration.deliverReply,
     log: (level, message) => ctx.logger[level](message)
   });
 

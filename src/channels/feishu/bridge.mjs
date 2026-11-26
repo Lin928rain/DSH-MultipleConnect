@@ -850,6 +850,9 @@ export class FeishuHarnessBridge {
     this.#signal = signal;
     const unbindInbox = harness.multipleConnect?.bindInboxProvider?.(createFeishuInboxProvider(client, {
       signal,
+      allowsWakeRecipient: (openId) => this.#accessPolicy
+        ? evaluateInboundAccess(this.#accessPolicy, { conversationType: 'direct', senderIds: openId }).allowed
+        : isAllowedSender({ sender: { sender_id: { open_id: openId } } }, this.#allowedSenderOpenIds),
       allowHistoryItem: (item, chatType) => {
         const conversationType = (item.chat_type ?? chatType) === 'p2p' ? 'direct' : 'group';
         if (!this.#accessPolicy) return isAllowedSender({ sender: { sender_id: { open_id: item.sender?.id } } }, this.#allowedSenderOpenIds);
@@ -5494,14 +5497,16 @@ export class FeishuHarnessBridge {
     const liveCot = this.#stepPushMode === FEISHU_STEP_PUSH_MODES.LIVE_COT
       && !liveCotInTopic
       && typeof this.#channel?.createCot === 'function'
-      && typeof this.#channel?.writeCotEvents === 'function';
+      && typeof this.#channel?.writeCotEvents === 'function'
+      && typeof this.#channel?.completeCot === 'function';
     const cot = liveCot
       ? new FeishuLiveCot(this.#channel, chatId, {
           replyTo: messageId,
           hidden: false,
-          onFailure: (error) => this.#logger.warn?.(
+          onFailure: (error, context) => this.#logger.warn?.(
             '[dsh-feishu] native live process failed; final answer will continue:',
             error?.message ?? String(error),
+            context,
           ),
         })
       : null;
